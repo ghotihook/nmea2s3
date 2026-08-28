@@ -1,10 +1,11 @@
 -- metrics_1s — the queryable view over `observations`.
 --
--- nmea2s3-update-pg writes one column per decoded field and takes last() per
--- bucket. It deliberately does not choose between instruments, and
--- deliberately does not average. Both of those are policy, both change, and
--- both are cheap here and irreversible if done at write time. This file is
--- where they belong.
+-- nmea2s3-update-pg writes one column per decoded field. Within a column,
+-- where two devices report the same field, it resolves them by N2K priority
+-- then source address and keeps that device's last sample. It deliberately
+-- does not choose BETWEEN columns, and deliberately does not average. Both of
+-- those are policy, both change, and both are cheap here and irreversible if
+-- done at write time. This file is where they belong.
 --
 -- ADAPT IT TO YOUR ARCHIVE. `observations` only has columns for fields that
 -- have actually appeared in yours, so a chain naming a field no device of

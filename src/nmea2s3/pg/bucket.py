@@ -6,8 +6,9 @@ Two decisions live here and nowhere else.
 
 WHAT `last` MEANS
 -----------------
-Each bucket keeps, per field, the value from the latest sample in that
-bucket. Not a mean.
+Each bucket keeps, per field, one real reading: the latest sample in that
+bucket from the best-ranked device reporting the field (see below). Not a
+mean.
 
 The tradeoff is worth stating plainly, because a previous investigation in
 the project this came from concluded the opposite for a fixed 1-second grid:
@@ -31,23 +32,43 @@ So `last` is the honest primitive for a raw, auto-widening table. If you
 want a mean, take it in SQL over these rows, where you can say which
 columns are angles.
 
-TIE-BREAKING, WHICH IS NOT OPTIONAL
------------------------------------
-Two devices can report the same field in the same bucket, and without
-arbitration both land in the same column. "Last" alone does not settle that:
-samples can share a timestamp. Ordering is therefore (ts, then lowest N2K
-priority, then lowest source address) — the same preference the arbitration
-chains used, for the same reason.
+CHOOSING BETWEEN DEVICES, WHICH IS NOT OPTIONAL
+-----------------------------------------------
+Two devices can report the same field into the same bucket, and they land in
+the same column: a field id carries the PGN's own discriminators, never a
+source address. So the bucket has to pick one, and does, in this order:
 
-That rule is why no device is named anywhere here. Source addresses are
-leased by ISO address claiming and change when a bus is repowered, so
-choosing by address silently repoints itself; sorting by it does not.
-Priority is set by the sending device's firmware and travels with it, which
-is what separates a 10 Hz sensor at priority 1 from a 1 Hz one at priority 3.
+  1. lowest N2K priority number
+  2. then lowest source address
+  3. then the latest sample
+
+Device first, sample second. The bucket resolves to ONE device and takes
+that device's last reading in the bucket — the same preference the
+arbitration chains used, for the same reason. Ordering by time first
+instead, with priority only settling an exact tie on the timestamp, meant a
+column alternated between two instruments sample by sample, decided by
+whichever happened to report last: two devices differing by a known offset
+produced a column that was neither of them and that no reader could
+reproduce.
+
+The cost is staleness bounded by the bucket. A priority-1 device reporting
+at 0.2 Hz wins a 1 s bucket it appears in, even against a priority-3 sample
+40 ms later. It cannot pin the column beyond that: no state crosses a bucket
+boundary, so in the buckets where the better device says nothing at all, the
+next best wins outright and the column carries on.
+
+That rule is also why no device is named anywhere here. Priority is set by
+the sending device's firmware and travels with it, which is what separates a
+10 Hz sensor at priority 1 from a 1 Hz one at priority 3. Source addresses
+are leased by ISO address claiming and change when a bus is repowered, so
+they rank devices deterministically but identify none — which is exactly
+what a tie-break needs to be, and exactly what a choice must not be.
 
 NMEA 0183 carries neither priority nor source address, so all of a field's
 talkers fall to the same sentinel and the genuinely last one wins. Three XDR
-talkers share this archive, so that is real rather than hypothetical.
+talkers share this archive, so that is real rather than hypothetical. The
+sentinels only ever compete with each other: a field id is prefixed by its
+sentence type or by `n2k_`, so the two protocols never share a column.
 """
 
 import re
@@ -56,8 +77,10 @@ from datetime import datetime, timedelta, timezone
 from ..decode import n0183 as n0183_sentence
 from . import ranges, wire_n0183, wire_n2k
 
-# 0183 has no priority or source address. These sort AFTER every real N2K
-# value, so a real priority always wins a tie against "unknown".
+# 0183 has no priority or source address, and the sort key has slots for
+# both. These sentinels rank last, so an unknown priority never outranks a
+# real one — which in practice only matters between 0183 talkers, since the
+# two protocols never share a column.
 ANY_PRIO = 1 << 30
 ANY_SRC = 1 << 30
 
@@ -139,7 +162,7 @@ class Buckets:
 
     def __init__(self, bucket: timedelta):
         self.bucket = bucket
-        # bucket_ts -> field -> (ts, prio, src, value); the first three are
+        # bucket_ts -> field -> (-prio, -src, ts, value); the first three are
         # the sort key that decides which sample wins.
         self._rows: dict[datetime, dict[str, tuple]] = {}
         self.dropped_out_of_range = 0
@@ -155,10 +178,14 @@ class Buckets:
             if not ranges.in_range(field, value):
                 self.dropped_out_of_range += 1
                 continue
-            key = (ts, -prio, -src)     # later ts wins; then lower prio, lower src
+            # Device first, sample second: lower priority number, then lower
+            # source address, then later ts. Written once and stored as-is —
+            # a second copy of the expression could disagree with this one
+            # about which sample is ahead.
+            key = (-prio, -src, ts)
             current = row.get(field)
             if current is None or key > current[:3]:
-                row[field] = (ts, -prio, -src, value)
+                row[field] = (*key, value)
 
     def fields(self) -> set[str]:
         return {f for row in self._rows.values() for f in row}

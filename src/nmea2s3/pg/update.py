@@ -25,17 +25,22 @@ COLUMNS ARE `proto_field`, ONE PER DECODED FIELD
 ------------------------------------------------
 `n2k_sog`, `rmc_spd_over_grnd`, `vtg_spd_over_grnd_kts` are three columns,
 not one. There is deliberately no arbitration step choosing a winner between
-instruments reporting the same quantity: this table records what each
-instrument actually said. Preferring one over another is a question about
-your boat, it changes over time, and it is answerable in SQL over these rows
-— whereas a value discarded at write time is gone from a table that is
-supposed to be the queryable form of the archive.
+COLUMNS: this table records what each instrument actually said. Preferring a
+GPS's speed over a paddlewheel's is a question about your boat, it changes
+over time, and it is answerable in SQL over these rows — whereas a value
+discarded at write time is gone from a table that is supposed to be the
+queryable form of the archive.
 
-`last()`, NOT A MEAN
---------------------
-Each bucket takes the latest sample of each field. See bucket.py for why
-that is the right primitive for an auto-widening table with a configurable
-bucket, and for how ties between two devices are broken.
+Two devices reporting the SAME field are a different question, because they
+share one column and one of them has to be in it. That is settled by N2K
+priority, then source address — see bucket.py.
+
+ONE DEVICE PER BUCKET, ITS LAST SAMPLE, NOT A MEAN
+--------------------------------------------------
+Each bucket resolves each field to one device — lowest priority number, then
+lowest source address — and takes that device's latest sample in the bucket.
+See bucket.py for why that is the right primitive for an auto-widening table
+with a configurable bucket, and for what it costs.
 
 EXACTLY-ONCE, BY OBJECT
 -----------------------

@@ -90,7 +90,7 @@ def test_buckets_are_anchored_to_the_epoch_not_to_the_batch():
         assert (b - a).total_seconds() % step.total_seconds() == 0, size
 
 
-# ── last(), and what breaks ties ─────────────────────────────────────────
+# ── choosing a device, then its last sample ──────────────────────────────
 
 def test_the_bucket_keeps_the_last_sample_not_an_average():
     b = bucket.Buckets(timedelta(seconds=1))
@@ -102,35 +102,55 @@ def test_the_bucket_keeps_the_last_sample_not_an_average():
     assert rows[0]["mwv_wind_angle_r"] == 30.0, "last, not the mean of 20.0"
 
 
-def test_a_tie_on_time_is_broken_by_priority_then_source():
-    """Two devices reporting one field land in one column, and samples can
-    share a timestamp. Without a tie-break the winner is whichever order the
-    dict happened to see them in, and the table stops being reproducible.
-
-    Drives real frames: this test carried a copy of the rule written out in
-    its own body until 2026-08-29, so it passed whatever bucket.py did.
-    """
+def test_the_best_priority_wins_the_bucket_it_reported_in():
+    """Two devices reporting one field land in one column, so the bucket has
+    to pick one. Priority first, and not merely as a tie-break on the exact
+    timestamp: the priority-1 sample here is the EARLIEST of the three."""
     b = bucket.Buckets(timedelta(seconds=1))
-    for prio, src, sog in ((3, 5, 2.0), (1, 9, 6.4), (7, 2, 9.0)):
-        b.add(_rec(T0, "n2k", _n2k(prio, src, sog)))
+    for offset, prio, src, sog in ((0, 1, 9, 6.4), (100, 3, 5, 2.0), (200, 7, 2, 9.0)):
+        b.add(_rec(T0 + timedelta(milliseconds=offset), "n2k", _n2k(prio, src, sog)))
     assert abs(b.rows()[0]["n2k_sog"] - 6.4) < 0.01, \
-        "lowest priority number wins a tie on ts, whatever the arrival order"
+        "lowest priority number wins, whatever reported afterwards"
 
 
-def test_a_tie_on_time_and_priority_falls_to_the_source_address():
-    """Same priority, so the sort has to reach its third key. Source
-    addresses are leased by ISO address claiming and change when the bus is
-    repowered — sorting by one is stable, choosing a device by one is not."""
+def test_equal_priority_falls_to_the_lowest_source_address():
+    """Same priority, so the sort reaches its second key — again before time
+    is consulted: the winning sample is the earlier one."""
     b = bucket.Buckets(timedelta(seconds=1))
-    for src, sog in ((9, 2.0), (2, 6.4)):
-        b.add(_rec(T0, "n2k", _n2k(1, src, sog)))
+    for offset, src, sog in ((0, 2, 6.4), (100, 9, 2.0)):
+        b.add(_rec(T0 + timedelta(milliseconds=offset), "n2k", _n2k(1, src, sog)))
     assert abs(b.rows()[0]["n2k_sog"] - 6.4) < 0.01, "lower source address wins"
 
 
-def test_a_later_sample_beats_a_better_priority():
-    """`last` means last. Priority only settles a tie ON TIME — otherwise a
-    high-priority device that stopped reporting would pin the column
-    forever."""
+def test_the_winning_device_contributes_its_own_latest_sample():
+    """`last` still means last — within the device the first two keys chose.
+    The column is one instrument's reading at a known moment, never a value
+    assembled from two of them."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    for offset, prio, src, sog in ((0, 1, 9, 5.0), (100, 3, 5, 2.0), (200, 1, 9, 6.4)):
+        b.add(_rec(T0 + timedelta(milliseconds=offset), "n2k", _n2k(prio, src, sog)))
+    assert abs(b.rows()[0]["n2k_sog"] - 6.4) < 0.01, \
+        "the better device's later sample, not its first"
+
+
+def test_a_better_device_cannot_pin_a_bucket_it_missed():
+    """The bound on how stale the rule can make a column: nothing crosses a
+    bucket boundary, so a priority-1 device that reports at 0.2 Hz wins only
+    the buckets it actually appears in. The rest belong to the next best,
+    outright."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n2k", _n2k(1, 9, 6.4)))                       # bucket 1
+    b.add(_rec(T0 + timedelta(seconds=1), "n2k", _n2k(3, 5, 2.0)))  # bucket 2, alone
+    first, second = b.rows()
+    assert abs(first["n2k_sog"] - 6.4) < 0.01
+    assert abs(second["n2k_sog"] - 2.0) < 0.01, \
+        "a device absent from a bucket cannot win it"
+
+
+def test_the_latest_sample_wins_between_equally_ranked_talkers():
+    """0183 carries neither priority nor source address, so its talkers are
+    all equal and the sort falls through to time — where `last` is the whole
+    rule. Three XDR talkers share this archive, so this is the real case."""
     b = bucket.Buckets(timedelta(seconds=10))
     b.add(_rec(T0, "n0183", _nmea("IIMWV,010.0,R,10.5,N,A")))
     b.add(_rec(T0 + timedelta(seconds=1), "n0183", _nmea("IIMWV,020.0,R,10.5,N,A")))

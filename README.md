@@ -220,12 +220,21 @@ it rebuilds from the archive.
 
 **Columns are `proto_field`, one per decoded field.** `n2k_sog`,
 `rmc_spd_over_grnd` and `vtg_spd_over_grnd_kts` are three columns, not one.
-Nothing picks a winner between instruments reporting the same quantity —
-which instrument you trust is a question about your boat, it changes, and
-it is answerable in SQL over these rows. A value discarded at write time is
-not.
+Nothing picks a winner *between columns* — which instrument you trust is a
+question about your boat, it changes, and it is answerable in SQL over these
+rows. A value discarded at write time is not.
 
-**Each bucket takes `last()`**, the latest real reading, not a mean. A mean
+**Two devices reporting the same field share one column**, so there one of
+them has to win. The bucket picks by **lowest N2K priority number, then
+lowest source address, then the latest sample** — the device first, then that
+device's last reading. Priority is set by the sending device's firmware and
+travels with it; addresses are leased by ISO address claiming and change when
+the bus is repowered, so they rank devices without naming any. The cost is
+bounded staleness: a priority-1 device reporting at 0.2 Hz wins the buckets
+it appears in, and no others — nothing carries across a bucket boundary, so a
+device that goes quiet loses the next bucket outright.
+
+**Each bucket takes `last()`**, a real reading, not a mean. A mean
 would need to know which fields are angles (the mean of 359° and 1° is 180°),
 and this table adds columns for fields nobody has declared. Take a mean in
 SQL, where you can say which columns are bearings.
