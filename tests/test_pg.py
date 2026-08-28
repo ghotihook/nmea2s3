@@ -11,6 +11,7 @@ module has to get right is the DDL and the upsert, and both are strings.
 """
 
 import os
+import struct
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,19 @@ def _nmea(body: str) -> str:
     for ch in body:
         checksum ^= ord(ch)
     return f"${body}*{checksum:02X}"
+
+
+def _n2k(prio: int, src: int, sog_kn: float) -> str:
+    """A PGN 129026 (COG/SOG rapid) frame from one device, in the candump
+    form the archive stores. Priority and source address live in the CAN
+    identifier, which is exactly what the tie-break sorts on — so varying
+    them here varies the thing under test rather than a stand-in for it.
+    """
+    can_id = (prio << 26) | (0x1F802 << 8) | src
+    payload = (bytes([0xFF, 0xFC])                       # SID, COG reference
+               + struct.pack("<HH", 0, round(sog_kn / 1.94384 / 0.01))
+               + b"\xff\xff")
+    return f"{can_id:08x}#{payload.hex()}"
 
 
 def _rec(ts, proto, raw):
@@ -91,15 +105,26 @@ def test_the_bucket_keeps_the_last_sample_not_an_average():
 def test_a_tie_on_time_is_broken_by_priority_then_source():
     """Two devices reporting one field land in one column, and samples can
     share a timestamp. Without a tie-break the winner is whichever order the
-    dict happened to see them in, and the table stops being reproducible."""
+    dict happened to see them in, and the table stops being reproducible.
+
+    Drives real frames: this test carried a copy of the rule written out in
+    its own body until 2026-08-29, so it passed whatever bucket.py did.
+    """
     b = bucket.Buckets(timedelta(seconds=1))
-    row = {}
-    # feed the sort key directly: prio 3 first, then the better prio 1
-    for prio, src, value in ((3, 5, 111.0), (1, 9, 222.0), (7, 2, 333.0)):
-        key = (T0, -prio, -src)
-        if "f" not in row or key > row["f"][:3]:
-            row["f"] = (*key, value)
-    assert row["f"][3] == 222.0, "lowest priority number wins a tie on ts"
+    for prio, src, sog in ((3, 5, 2.0), (1, 9, 6.4), (7, 2, 9.0)):
+        b.add(_rec(T0, "n2k", _n2k(prio, src, sog)))
+    assert abs(b.rows()[0]["n2k_sog"] - 6.4) < 0.01, \
+        "lowest priority number wins a tie on ts, whatever the arrival order"
+
+
+def test_a_tie_on_time_and_priority_falls_to_the_source_address():
+    """Same priority, so the sort has to reach its third key. Source
+    addresses are leased by ISO address claiming and change when the bus is
+    repowered — sorting by one is stable, choosing a device by one is not."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    for src, sog in ((9, 2.0), (2, 6.4)):
+        b.add(_rec(T0, "n2k", _n2k(1, src, sog)))
+    assert abs(b.rows()[0]["n2k_sog"] - 6.4) < 0.01, "lower source address wins"
 
 
 def test_a_later_sample_beats_a_better_priority():

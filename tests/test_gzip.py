@@ -43,11 +43,15 @@ def content_id(text: str) -> str:
 
 
 def _lines(n=5000):
-    return [json.dumps({"ts": f"2026-08-24T00:0{i % 10}:00+00:00", "device_id": "signalk",
+    """The six-field record, and nothing else: `pgn`, `src_addr` and
+    `priority` stopped being stored — they are pure functions of `raw` — but
+    stayed in this fixture, sizing every object here against a row shape the
+    logger cannot produce."""
+    return [json.dumps({"ts": f"2026-08-24T00:0{i % 10}:00+00:00",
+                        "mono": 58757.02 + i, "device_id": "signalk",
                         "src": "can0", "proto": "n2k",
-                        "raw": f"09f8{i % 9999:04x}#aabbccddeeff0011",
-                        "pgn": 129025, "src_addr": 2, "priority": 3,
-                        "mono": 58757.02 + i}, separators=(",", ":")) + "\n"
+                        "raw": f"09f8{i % 9999:04x}#aabbccddeeff0011"},
+                       separators=(",", ":")) + "\n"
             for i in range(n)]
 
 

@@ -243,7 +243,7 @@ def test_data_objects_are_content_type_gzip_with_no_content_encoding():
         def put_object(self, Bucket, Key, Body, **kw):
             seen.update(kw)
 
-    put_object_gz(Rec(), "b", "n2k/2026/08/24/120000-a.ndjson.gz", b"\x1f\x8b")
+    put_object_gz(Rec(), "b", "raw/2026/08/24/120000-n2k-a.ndjson.gz", b"\x1f\x8b")
     assert seen.get("ContentType") == GZIP_CONTENT_TYPE == "application/gzip"
     assert "ContentEncoding" not in seen, "must NOT be set — see put_object_gz"
 

@@ -8,8 +8,10 @@ import asyncio
 import gzip
 import json
 import os
+import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -288,7 +290,8 @@ def test_a_dead_loop_exits_instead_of_hanging():
     saved = L.N2KLogger
     L.N2KLogger = lambda can_iface: lg
     try:
-        asyncio.run(asyncio.wait_for(L._run(Args()), timeout=3))
+        with H.AuditLog() as log:
+            asyncio.run(asyncio.wait_for(L._run(Args()), timeout=3))
         assert False, "_run() should have re-raised"
     except asyncio.TimeoutError:
         assert False, "_run() hung instead of exiting"
@@ -296,6 +299,10 @@ def test_a_dead_loop_exits_instead_of_hanging():
         pass
     finally:
         L.N2KLogger = saved
+    # and the buffer is still written out on the way down, saying what killed it
+    assert log.entries[-1]["reason"] == "task_failed", \
+        "a crash must not be recorded as a clean shutdown"
+    assert log.entries[-1]["exit_code"] == 1
 
 
 # ── the unit file's paths are real ───────────────────────────────────────
@@ -308,7 +315,6 @@ def test_the_unit_starts_a_command_the_package_installs():
     pyproject.toml actually installs, or the unit fails at every start with
     203/EXEC.
     """
-    import re
     unit = _unit_directives()
     m = re.search(r"^ExecStart=(\S+)", unit, re.M)
     assert m, "the unit must have an ExecStart"
@@ -389,6 +395,72 @@ def test_every_directive_sits_in_a_section_systemd_reads_it_from():
             assert key in allowed, f"[{section}] {key} is not read from there"
 
 
+def _unit_value(unit: str, key: str) -> str | None:
+    for line in unit.splitlines():
+        if line.startswith(key + "="):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def _bytes(value: str) -> int:
+    """systemd's size suffixes, as MemoryMax= is written."""
+    scale = {"K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}
+    return (int(value[:-1]) * scale[value[-1]] if value[-1] in scale
+            else int(value))
+
+
+def test_the_unit_brings_the_interface_up_before_capturing():
+    """Binding a SocketCAN socket to a DOWN interface SUCCEEDS: the listener
+    logs `CAN listening on can0`, `systemctl status` is green, and not one
+    frame arrives. The listener's own reconnect loop does not cover it — that
+    fires when the interface is ABSENT, not when it is present and down.
+
+    Until this was added, can0 came up only because the n2k2ip gateway on the
+    same box happened to bring it up first: disable or reorder that unit and
+    this one captures nothing, silently.
+    """
+    unit = _unit_directives()
+    step = _unit_value(unit, "ExecStartPre")
+    assert step, "nothing brings the interface up"
+    assert step.startswith("+"), \
+        "`ip link` needs CAP_NET_ADMIN; `+` runs this one step privileged"
+    assert "ip link set" in step
+    iface = re.search(r"^ExecStart=\S+ --can (\S+)", unit, re.M).group(1)
+    assert f"ip link show {iface}" in step, \
+        "must configure the same interface ExecStart captures from"
+    assert "||" in step, \
+        "idempotent: the bus is shared, so an interface already up is left alone"
+
+
+def test_the_memory_limit_cannot_bind_before_the_buffer_cap():
+    """The two caps degrade completely differently: MAX_BUFFER_BYTES sheds its
+    oldest frames and keeps capturing, MemoryMax kills the process and loses
+    the entire buffer. At 128M this one bound first and turned a graceful shed
+    into a total loss, so the unit's number is a property of the code's rather
+    than a free-standing choice — and nothing but this test connects them.
+
+    Measured peak RSS at the buffer cap was 191 MB against a 48 MB cap, which
+    is where the 4x floor comes from.
+    """
+    limit = _bytes(_unit_value(_unit_directives(), "MemoryMax"))
+    assert limit >= 4 * L.MAX_BUFFER_BYTES, (
+        f"MemoryMax {limit // 1024 ** 2} MB would bind before the "
+        f"{L.MAX_BUFFER_BYTES // 1024 ** 2} MB buffer cap sheds anything")
+
+
+def test_the_logger_outranks_the_other_services_on_the_box():
+    """The gateway sharing this bus sits at -700, and this unit sat at -500 —
+    so under real memory pressure the kernel would have killed the logger
+    first, the exact inverse of what the comment above the directive claimed.
+    The gateway's traffic can be re-read off the bus a second later; a frame
+    this process misses does not exist anywhere.
+    """
+    score = _unit_value(_unit_directives(), "OOMScoreAdjust")
+    assert score is not None, "the OOM killer picks by score; say what this is worth"
+    assert int(score) <= -900, \
+        f"OOMScoreAdjust={score} is not below every other service on the box"
+
+
 def test_the_cpu_share_is_not_also_a_cap():
     """A quota would only ever bind during a flush-and-gzip burst, which is
     exactly the moment the CAN reader must not be throttled."""
@@ -423,33 +495,72 @@ def test_the_env_file_is_readable_by_systemd():
 
 # ── what the audit records have to answer ────────────────────────────────
 
+def _idle_loops(lg):
+    """Replace the four background loops with ones that do nothing, so start()
+    can be driven for the record it writes without capturing or uploading."""
+    async def idle():
+        while True:
+            await asyncio.sleep(1)
+    lg._can_listener = lg._flush_loop = lg._upload_loop = lg._stats_loop = idle
+
+
+async def _await_entry(log, timeout=5.0):
+    """The audit write is dispatched to a thread, so it lands slightly after
+    start() has moved on. Poll rather than sleep a guessed interval."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not log.entries:
+        assert loop.time() < deadline, "start() wrote no audit entry"
+        await asyncio.sleep(0.005)
+    return log.entries[0]
+
+
+def _start_entry(lg):
+    async def scenario(log):
+        task = asyncio.create_task(lg.start())
+        entry = await _await_entry(log)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return entry
+
+    with H.AuditLog() as log:
+        return asyncio.run(scenario(log))
+
+
 def test_the_start_record_says_how_much_booting_cost():
     """Two real reboots cost 6.7 and 14.6 minutes of capture before the first
     frame, and establishing that meant subtracting clock_epoch from the first
     frame's timestamp by hand.
 
-    It reads time.monotonic(), NOT /proc/uptime: stdlib, no filesystem, works
-    anywhere, and — the point — it is the same clock every frame's `mono` is
-    read from, so the two cannot disagree. The module header records that
-    `timedatectl` was removed as the only subprocess and the only systemd
-    coupling in the capture path; a procfs read is the same mistake wearing a
-    different hat."""
-    src = (H.REPO / "src" / "nmea2s3" / "logger.py").read_text()
-    assert '"mono_at_start": round(time.monotonic(), 1)' in src
-    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
-    assert "/proc" not in code
-
+    `mono_at_start` is read from time.monotonic(), the SAME clock every
+    frame's `mono` comes from, so the two cannot disagree — which is the
+    property asserted here, and the reason it is not /proc/uptime.
+    """
+    lg = _logger()
+    _idle_loops(lg)
+    entry = _start_entry(lg)
+    assert entry["application"] == "nmea2s3-logger"
+    assert abs(entry["mono_at_start"] - time.monotonic()) < 5, \
+        "not the clock the frames are stamped from"
+    assert abs(entry["clock_epoch"] - H.epoch()) < 1e-3, \
+        "clock_epoch must be ts - mono, the same boot epoch the rows carry"
 
 
 def test_the_stop_record_says_why():
     """A clean SIGTERM from a reboot and a task falling over both wrote
     exit_code 0 and identical text, so a gap in the data gave no clue which
     had happened — the first question you ask when you see one."""
-    src = (H.REPO / "src" / "nmea2s3" / "logger.py").read_text()
-    assert 'async def stop(self, reason: str = "unknown")' in src
-    assert 'await n2k_logger.stop("task_failed" if n2k_task in done else "signal")' in src
-    assert '0 if reason == "signal" else 1' in src, \
-        "exit_code exists for this; a crash should not report success"
+    lg = _logger()
+    with H.AuditLog() as log:
+        asyncio.run(lg.stop("signal"))
+        asyncio.run(lg.stop("task_failed"))
+    clean, crash = log.entries
+    assert (clean["reason"], clean["exit_code"]) == ("signal", 0)
+    assert (crash["reason"], crash["exit_code"]) == ("task_failed", 1), \
+        "a crash must not report success"
+    for entry in (clean, crash):
+        for counter in ("rx", "spooled", "objects", "dropped"):
+            assert counter in entry
 
 
 def test_both_records_carry_the_unuploaded_spool():
@@ -458,18 +569,22 @@ def test_both_records_carry_the_unuploaded_spool():
     so the number belongs either side of a restart: at stop it says what is at
     risk, at start what is about to be replayed.
 
-    A COUNT, not a size. Sizing needed .stat() on every file, which brought a
-    second directory walk and a race with the upload loop deleting them —
-    twenty-three lines of method and error handling for a number the journal
-    already prints every STATS_INTERVAL. Simplicity is the point of this
-    process: the less machinery it carries, the less can go wrong in the one
-    place that cannot be re-run.
+    A COUNT, not a size — two files, not their bytes. Sizing needed .stat() on
+    every file, which brought a second directory walk and a race with the
+    upload loop deleting them, for a number the journal already prints every
+    STATS_INTERVAL.
     """
-    src = (H.REPO / "src" / "nmea2s3" / "logger.py").read_text()
-    assert src.count(
-        '"spool_files": len(list(self.disk_dir.glob("disk.*.ndjson.gz")))') == 2
-    assert "_spool_pending" not in src, "no method survives for this"
-    assert "spool_bytes" not in src
+    lg = _logger()
+    lg.s3.up = False                                  # nothing drains
+    for offset in (-1, 0):
+        lg._write_spool(L._objects([H.frame(L, 0, day_offset=offset)]))
+
+    with H.AuditLog() as log:
+        asyncio.run(lg.stop("signal"))
+    assert log.entries[0]["spool_files"] == 2, "a count of files, not a size"
+
+    _idle_loops(lg)
+    assert _start_entry(lg)["spool_files"] == 2, "what the next run replays"
 
 
 def test_the_capture_path_makes_no_special_system_calls():

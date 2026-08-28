@@ -15,14 +15,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H                                              # noqa: E402
 from nmea2s3.ndjson import gzip_and_id_stream, iter_rows_ndjson_gz   # noqa: E402
 
-KEY = "n0183/2026/08/24/000000-deadbeef.ndjson.gz"
+KEY = "raw/2026/08/24/000000-n0183-deadbeefcafef00d.ndjson.gz"
 
 
 def _object(n):
+    """Rows in the shape the archive actually holds — the six-field record of
+    SCHEMA.md. The old per-protocol fields (`sentence_type`, `raw_data`,
+    `source_ip`) were still here long after nothing could write them."""
     lines = [json.dumps({"ts": f"2026-08-24T00:00:{i % 60:02d}+00:00",
-                         "device_id": "cmp135", "source_ip": "10.0.0.5",
-                         "sentence_type": "RMC",
-                         "raw_data": f"$GPRMC,{i:06d},A,3745.123,S,14512.456,E*6A"},
+                         "mono": 58757.02 + i, "device_id": "boat-pi",
+                         "src": "/dev/ttyUSB0", "proto": "n0183",
+                         "raw": f"$GPRMC,{i:06d},A,3745.123,S,14512.456,E*6A"},
                         separators=(",", ":")) + "\n" for i in range(n)]
     _, body = gzip_and_id_stream(iter(lines))
     s3 = H.FakeS3()
@@ -35,7 +38,7 @@ def test_every_row_comes_back_intact():
     got = list(iter_rows_ndjson_gz(s3, "test-bucket", KEY))
     assert len(got) == 5000
     assert got == [json.loads(l) for l in lines]
-    assert list(got[0]) == ["ts", "device_id", "source_ip", "sentence_type", "raw_data"]
+    assert list(got[0]) == ["ts", "mono", "device_id", "src", "proto", "raw"]
 
 
 def test_peak_memory_is_the_compressed_size_not_the_decompressed_object():
@@ -58,7 +61,7 @@ def test_it_is_a_generator_not_a_materialised_list():
     s3, _, _ = _object(50_000)
     it = iter_rows_ndjson_gz(s3, "test-bucket", KEY)
     first = next(it)
-    assert first["sentence_type"] == "RMC"
+    assert first["proto"] == "n0183"
     it.close()
 
 

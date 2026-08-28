@@ -8,9 +8,10 @@ stays distinguishable from "died partway", which no exception-catching
 wrapper can detect because a SIGKILL raises no exception. One lived in
 audit_log.py until 2026-08-28, called by nothing.
 
-The logger is the only writer here, and it is the shape that needs the
-pairing: it runs until something stops it, so a start with no end is how a
-killed run shows up at all.
+Two tools write here. The logger is the shape that needs the pairing: it
+runs until something stops it, so a start with no end is how a killed run
+shows up at all. `nmea2s3-update-pg` writes one entry per run that changed
+something, and none at all for `--dry-run`.
 """
 
 import os
@@ -39,9 +40,40 @@ def test_the_exporter_signals_a_partial_export_through_its_exit_code():
     assert "sys.exit(2)" in src, "a real exit code, not a claim in a log entry"
 
 
+# ── update-pg: writes only when it changed something ─────────────────────
+
+def test_a_dry_run_writes_no_audit_entry():
+    """`--dry-run` decodes and reports and touches nothing, so an entry for it
+    would be a permanent record of work that never happened — in a bucket
+    whose credentials cannot delete. Parsed rather than driven: reaching the
+    call site needs a live Postgres, and what has to hold is that the write
+    is unreachable on the dry-run branch, which is a property of the code's
+    shape.
+    """
+    import ast
+    src = (H.REPO / "src" / "nmea2s3" / "pg" / "update.py").read_text()
+
+    def writes_audit(nodes):
+        return any(isinstance(n, ast.Call) and getattr(n.func, "id", None) == "log_action_safely"
+                   for node in nodes for n in ast.walk(node))
+
+    guards = [n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.If) and "dry_run" in ast.dump(n.test)]
+    assert guards, "nothing distinguishes a dry run from a real one"
+    assert any(writes_audit(g.orelse) and not writes_audit(g.body) for g in guards), \
+        "the audit write must sit on the branch a dry run does not take"
+
+
 # ── the logger: brackets its own writes ──────────────────────────────────
 
-def test_logger_records_start_and_stop():
+def test_the_logger_names_itself_in_every_entry():
+    """Renamed from `flightrecorder_logger` when this was split into its own
+    repo. `_log/` is permanent, so both names live in the archive forever and
+    a reader has to know which one to expect from which era.
+
+    What each record has to SAY is in test_logger.py, next to the code that
+    produces it; this is the name and the counters only.
+    """
     import asyncio
     from nmea2s3 import logger as L
     lg = L.N2KLogger("can0")
@@ -49,8 +81,6 @@ def test_logger_records_start_and_stop():
     with H.AuditLog() as log:
         asyncio.run(lg.stop())
     assert len(log.entries) == 1
-    # Renamed from `flightrecorder_logger` when this was split into its own
-    # repo. `_log/` is permanent, so both names live in the archive forever.
     assert log.entries[0]["application"] == "nmea2s3-logger"
     assert "stopped" in log.entries[0]["comment"]
     # the counters that say what was written
