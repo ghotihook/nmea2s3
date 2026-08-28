@@ -41,19 +41,7 @@ cannot be re-run:
 pipx install --force git+https://github.com/ghotihook/nmea2s3.git
 ```
 
-To run it from a clone without installing at all — worth doing before you
-reinstall a service — put `src/` on the path and use `-m`. A bare
-`python src/nmea2s3/logger.py` will not work; the modules use relative
-imports and need package context:
-
-```bash
-PYTHONPATH=src python -m nmea2s3.logger --can can0
-PYTHONPATH=src python -m nmea2s3.export --proto n0183
-```
-
-Two commands:
-
-Three commands, all installed:
+Three commands land on your `PATH`:
 
 | command | does |
 |---|---|
@@ -81,14 +69,30 @@ deployment needs:
 curl -O https://raw.githubusercontent.com/ghotihook/nmea2s3/main/env.example
 curl -O https://raw.githubusercontent.com/ghotihook/nmea2s3/main/systemd/nmea2s3.service
 cp env.example env       # then fill in the four required values
-set -a; source env; set +a
 ```
 
-Four variables are required — endpoint, bucket, and a key pair. See
-`env.example` for the rest and for why the file carries no `export`
-keywords. **Give the logger a credential that can PUT and cannot DELETE.**
-The archive is the source of truth and nothing here ever removes an object,
-so a key that cannot delete turns an accident from unlikely into impossible.
+Four variables are required — endpoint, bucket, and a key pair; the rest are
+documented in `env.example`. **Give the logger a credential that can PUT and
+cannot DELETE.** The archive is the source of truth and nothing here ever
+removes an object, so a key that cannot delete turns an accident from
+unlikely into impossible.
+
+**Loading the file.** It is plain `KEY=value` lines with **no `export`**,
+because systemd's `EnvironmentFile=` parser rejects any line that carries one
+— a warning per line in the journal and a service that starts with none of
+its environment. That format costs one thing in a shell: a bare
+`source env` sets shell variables without exporting them, so the commands you
+then run see nothing. Wrap it in `set -a`:
+
+```bash
+set -a; source env; set +a     # the commands below read the environment
+nmea2s3-logger --can can0
+```
+
+Under systemd nothing needs sourcing — the unit points `EnvironmentFile=` at
+a copy installed mode 600 under `/etc` (below) and reads it as root, before
+dropping to `User=`, so the logger's own account never needs to be able to
+read the secret at all.
 
 ## Run it
 
