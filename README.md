@@ -149,14 +149,36 @@ before it starts dropping its oldest batch.
 nmea2s3-exporter | jq .                                    # everything, ndjson, to stdout
 nmea2s3-exporter --proto n0183 --since 2026-08-01 -o wk.ndjson   # one protocol
 nmea2s3-exporter --source _log --format csv -o             # audit log, auto-named file
-nmea2s3-exporter --format candump --since 2026-08-28 | candump2analyzer | analyzer -json
+nmea2s3-exporter --proto n2k --format candump | canboat convert   # decode with canboat
+```
+
+**Decoding the archive with canboat is one pipe** — that last line is the
+whole of it, and a day at a time is usually what you want:
+
+```bash
+nmea2s3-exporter --proto n2k --format candump --since 2026-08-28 --until 2026-08-28 \
+  | canboat convert
 ```
 
 `--format candump` writes the ASCII form `candump -L` writes and canboat
-reads — `(1502979132.106111) slcan0 09F50374#000A00FFFF00FFFF` — so a day
-out of the archive pipes straight into `analyzer` and nothing here has to
-learn what a PGN means. It is CAN frames, so it implies `--proto n2k`:
-0183 sentences carry no CAN identifier and the format has no way to say so.
+reads:
+
+```
+(1502979132.106111) slcan0 09F50374#000A00FFFF00FFFF
+```
+
+Nothing here decodes anything — `raw` already *is* `<canid>#<data>`, so the
+exporter re-cases it, pads the identifier to the full 29-bit width and puts
+the timestamp back in the shape candump wrote it in. What a PGN *means* stays
+canboat's business, which is the same reason the archive stores no `pgn`
+column: today's decoder never gets frozen into objects that are never
+rewritten.
+
+It is CAN frames, so it implies `--proto n2k` — 0183 sentences carry no CAN
+identifier and the format has no way to say so. Passing `--proto n2k`
+explicitly, as above, says the same thing out loud. `--source _log` or
+`--proto n0183` alongside it are refused at the flags rather than quietly
+exporting nothing.
 
 `--proto` filters on the object *name*, which a `LIST` already returned, so a
 narrowed export downloads nothing it will discard. That matters more than it

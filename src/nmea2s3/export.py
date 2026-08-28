@@ -3,9 +3,12 @@
 
 Exports the captured archive (--source raw, the default) or the operational
 audit log (--source _log); --format picks between ndjson (default), CSV and
-candump — the ASCII form `candump -L` writes and canboat's
-candump2analyzer reads, so an archived day can be piped straight into
-`analyzer` without anything here learning what a PGN means.
+candump — the ASCII form `candump -L` writes and canboat reads, so an
+archived day decodes in one pipe:
+
+    nmea2s3-exporter --proto n2k --format candump | canboat convert
+
+without anything here learning what a PGN means.
 
 Reads the day-partitioned key layout SCHEMA.md defines —
 raw/<yyyy>/<mm>/<dd>/<HHMMSS>-<proto>-<cid>.ndjson.gz — and writes one
@@ -309,9 +312,9 @@ def main():
     parser.add_argument("--format", choices=["candump", "csv", "ndjson"], default="ndjson",
                          help="Output format (default: ndjson). _log's `details` field is nested — kept as "
                               "real nested JSON in ndjson, flattened to a JSON string per cell in csv. "
-                              "candump writes `(epoch.usec) iface CANID#DATA`, what `candump -L` writes and "
-                              "canboat's candump2analyzer reads; it is CAN frames only, so it implies "
-                              "--proto n2k")
+                              "candump writes `(epoch.usec) iface CANID#DATA`, what `candump -L` writes "
+                              "and canboat reads (`... --format candump | canboat convert`); it is CAN "
+                              "frames only, so it implies --proto n2k")
     parser.add_argument("--since", type=parse_date, default=None, metavar="YYYY-MM-DD",
                          help="First UTC date to include (default: everything — no lower bound)")
     parser.add_argument("--until", type=parse_date, default=None, metavar="YYYY-MM-DD",
