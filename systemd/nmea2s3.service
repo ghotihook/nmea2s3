@@ -56,6 +56,27 @@ Group=youruser
 # own account never needs to be able to read the secret at all.
 EnvironmentFile=/etc/nmea2s3/env
 
+# Bring can0 up before starting, but only if it is not already up.
+#
+# This exists because binding a SocketCAN socket to a DOWN interface SUCCEEDS.
+# The listener would log "CAN listening on can0", look entirely healthy in
+# `systemctl status`, and receive nothing — the one failure this service must
+# never have, because a frame missed is gone for good. The listener's own
+# reconnect loop does not help: it only fires when the interface is ABSENT.
+#
+# Idempotent on purpose, because can0 is shared with the n2k2ip gateway on
+# this box. Whoever starts first configures the interface; the others see it
+# up and leave it alone — no flap, no start-up race, no ordering dependency
+# between the two units. restart-ms 100 lets the controller recover from a
+# bus-off on its own. The trailing check fails the unit if can0 cannot be
+# brought up at all, which is better than starting blind and capturing zero.
+#
+# `+` runs this one step with full privileges. Everything else here still
+# runs as User=youruser under the sandboxing below; `ip link` needs
+# CAP_NET_ADMIN and would fail without it. NoNewPrivileges= is not in the
+# way — it blocks GAINING privilege via setuid, and this starts as root.
+ExecStartPre=+/bin/sh -c 'ip link show can0 | grep -qw UP || ip link set can0 up type can bitrate 250000 restart-ms 100 2>/dev/null; ip link show can0 | grep -qw UP'
+
 # The console script pipx installed. `--can can0` is the default and is
 # spelled out so the interface is visible in `systemctl status`.
 ExecStart=/home/youruser/.local/bin/nmea2s3-logger --can can0
@@ -99,7 +120,13 @@ MemoryMax=512M
 # Prefer to kill almost anything else on the box before this. Under real
 # memory pressure with no swap, the kernel's OOM killer picks a victim by
 # score; this makes the logger a poor candidate.
-OOMScoreAdjust=-500
+#
+# Lower than every other service on this box, and that is the whole point.
+# n2k2ip sits at -700; at -500 the kernel would have killed THIS first, which
+# inverts the intent above — the gateway's traffic can be re-read off the bus
+# a second later, and a frame this process misses does not exist anywhere.
+# The gap leaves room to slot something between the two later.
+OOMScoreAdjust=-900
 
 # A share, not a cap: it only matters when something else wants the CPU too.
 # There is deliberately no CPUQuota — json encoding is ~0.1% of one core at
