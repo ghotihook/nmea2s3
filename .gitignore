@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+build/
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Claude Code local settings
+.claude/
+
+# Real credentials. `env.example` is the template that is committed; the
+# filled-in copy never is. Both spellings, since `env` (no dot) is what the
+# systemd unit's EnvironmentFile= points at.
+env
+.env
+
+# Local spool files, if DISK_DIR is ever pointed at the working directory
+disk.*.ndjson.gz
+n2k_fallback/
+
+# Exports — regeneratable, sometimes large
+*.ndjson
+*.csv

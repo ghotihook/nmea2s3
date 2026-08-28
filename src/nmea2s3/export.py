@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""nmea2s3-exporter — read the archive back out as ndjson or CSV.
+
+Exports the captured archive (--source raw, the default) or the operational
+audit log (--source _log); --format picks between ndjson (default) and CSV.
+
+Reads the day-partitioned key layout SCHEMA.md defines —
+raw/<yyyy>/<mm>/<dd>/<HHMMSS>-<proto>-<cid>.ndjson.gz — and writes one
+record per row. Every protocol shares one six-field record, so an export
+can span n2k and n0183 in a single well-formed file; --proto narrows it to
+one. That filter reads the object NAME, which a LIST already returned, so a
+narrowed export downloads nothing it will discard — worth having, since the
+protocols differ in volume by orders of magnitude.
+
+_log is the operational audit log from audit_log.py — same day-partitioned
+layout, but outside raw/ and each object is one plain (non-gzipped) JSON
+record rather than gzip'd ndjson, so it is listed and read differently (see
+iter_log_keys and READERS below). Its `details` field is a nested object: CSV has no native
+way to hold that, so csv output flattens it to a JSON string per cell;
+ndjson output keeps it nested, since ndjson supports that natively — one
+real reason to prefer --format csv for _log specifically if you want a
+flat file, since ndjson is otherwise the default everywhere.
+
+CSV and ndjson share the entire pipeline (listing, date filtering,
+retry/skip) — only the final per-row write differs (see make_writer) — so
+this is one command with a --format switch rather than two that would
+drift apart.
+
+Defaults to stdout, ndjson, so `nmea2s3-exporter | less` or `| jq .` just
+works with no flags at all; pass --since/--until to narrow the date range
+and --proto to narrow to one protocol. Pass -o/--output PATH to write a file instead, or
+bare -o with no PATH to write to an auto-named file in the current
+directory: <timestamp>-<source>.<format>.
+
+Date and protocol filtering are both cheap client-side checks against the
+key itself — the day from its path, the protocol from its name — decided
+before anything is fetched or decompressed. Object counts are
+day-granularity (hundreds to low thousands), never per-row.
+
+Streams row by row rather than buffering — an archive of hundreds of
+millions of rows exports in constant memory.
+
+Required environment variables (never hardcoded — see env.example):
+  NMEA2S3_S3_ENDPOINT_URL, NMEA2S3_S3_BUCKET,
+  NMEA2S3_S3_ACCESS_KEY_ID, NMEA2S3_S3_SECRET_ACCESS_KEY
+
+Optional: NMEA2S3_S3_REGION (default us-east-1; DO Spaces ignores it, boto3
+requires it)
+"""
+
+import argparse
+import csv
+import json
+import os
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+from botocore.exceptions import BotoCoreError, ClientError
+
+from . import __version__
+from .ndjson import (iter_keys, iter_log_keys, iter_rows_ndjson_gz,
+                      make_s3_client, required_env)
+from .retry import with_retries
+
+# Column/field order matches SCHEMA.md and audit_log.py. Checked against
+# both in tests/test_formats.py: naming the columns here means a new field
+# has to be added in this dict too, or exports silently lose it.
+#
+# `raw` is ONE column set for every protocol — that is the whole point of the
+# unified record. Before it, n2k and n0183 had different columns and could
+# not be exported into a single file at all; now `--proto` narrows a stream
+# that is otherwise uniform, and a CSV of mixed protocols is well-formed.
+FIELDS = {
+    "raw":  ["ts", "mono", "device_id", "src", "proto", "raw"],
+    "_log": ["timestamp", "application", "host", "exit_code", "comment", "details"],
+}
+
+
+def load_config() -> dict:
+    return {
+        "s3_endpoint_url": required_env("NMEA2S3_S3_ENDPOINT_URL"),
+        "s3_bucket": required_env("NMEA2S3_S3_BUCKET"),
+        "s3_region": os.environ.get("NMEA2S3_S3_REGION", "us-east-1"),
+        "s3_access_key_id": required_env("NMEA2S3_S3_ACCESS_KEY_ID"),
+        "s3_secret_access_key": required_env("NMEA2S3_S3_SECRET_ACCESS_KEY"),
+    }
+
+
+def parse_date(s: str) -> date:
+    return datetime.fromisoformat(s).date()
+
+
+def iter_rows_log_json(s3, bucket: str, key: str):
+    """_log: one plain (non-gzipped) JSON object per key — see
+    audit_log.py. Yielded as-is, `details` still nested — format-
+    specific flattening (or not) happens in make_writer, not here, so
+    both output formats read from the same unmodified record."""
+    def _get():
+        return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    body = with_retries(_get, what=f"read {key}")
+    yield json.loads(body.decode("utf-8"))
+
+
+READERS = {
+    "raw":  iter_rows_ndjson_gz,
+    "_log": iter_rows_log_json,
+}
+
+
+def make_writer(out, fmt: str, fieldnames: list[str]):
+    """Return a write_row(row) callable for the chosen format. CSV writes
+    a header immediately and flattens any nested value (just _log's
+    `details`, currently) to a JSON string, since a CSV cell can't hold a
+    nested structure. ndjson writes one json.dumps line per row and keeps
+    nested values as-is — the whole reason to prefer --format ndjson for
+    _log specifically."""
+    if fmt == "csv":
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+
+        def write_row(row: dict) -> None:
+            flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, dict) else v)
+                    for k, v in row.items()}
+            writer.writerow(flat)
+        return write_row
+
+    if fmt == "ndjson":
+        def write_row(row: dict) -> None:
+            out.write(json.dumps(row, separators=(",", ":")) + "\n")
+        return write_row
+
+    raise ValueError(f"unknown format: {fmt!r}")
+
+
+def export_source(s3, bucket: str, source: str, proto: str | None,
+                   since: date, until: date,
+                   output_path: Path | None, fmt: str, verbose: bool) -> tuple[int, int, int]:
+    """Export one source to output_path (or stdout if None). Returns
+    (objects_read, objects_failed, rows_written); the caller turns a
+    non-zero objects_failed into exit code 2."""
+    fieldnames = FIELDS[source]
+    read_rows = READERS[source]
+
+    # Atomic write: build the file under a sibling .tmp name and rename it
+    # into place only once the export has actually finished. Without this,
+    # a process kill or a network-mount hiccup mid-run (e.g. writing to a
+    # remote share) leaves a truncated file sitting at the real output
+    # path with no sign it's incomplete — same tmp-then-rename reasoning
+    # as the disk spool in logger.py.
+    tmp_path = output_path.with_name(output_path.name + ".tmp") if output_path else None
+    out = open(tmp_path, "w", newline="", encoding="utf-8") if tmp_path else sys.stdout
+
+    try:
+        write_row = make_writer(out, fmt, fieldnames)
+
+        objects_read = 0
+        objects_failed = 0
+        rows_written = 0
+        keys = (iter_log_keys(s3, bucket, since, until) if source == "_log"
+                else iter_keys(s3, bucket, since, until, proto))
+        for key in keys:
+            # A network failure (with its own retries) happens before any
+            # row is yielded, so that case leaves zero rows from this key
+            # in the output. Skip and keep going rather than aborting the
+            # whole export over one bad object: this is a read-only
+            # analysis tool, not a writer of the archive, so a
+            # best-effort result (clearly reported) beats losing everything
+            # to one persistent failure — and that applies just as much to
+            # a malformed object (corrupt gzip, invalid JSON, a row with a
+            # field FIELDS doesn't expect) as to a network error, so both
+            # are caught and skipped the same way.
+            try:
+                row_count = 0
+                for row in read_rows(s3, bucket, key):
+                    write_row(row)
+                    row_count += 1
+                objects_read += 1
+                rows_written += row_count
+                if verbose:
+                    print(f"  {key} ({row_count} rows)", file=sys.stderr)
+            except (BotoCoreError, ClientError) as e:
+                objects_failed += 1
+                print(f"  SKIPPED {key} — retries exhausted: {e}", file=sys.stderr)
+            except Exception as e:
+                # Not a network failure — malformed/corrupt content
+                # (bad gzip, invalid JSON, an unexpected field). Same
+                # best-effort handling: skip this object, keep going.
+                # Unlike the network case, rows already written from
+                # THIS key before the bad row was hit stay in the output.
+                objects_failed += 1
+                print(f"  SKIPPED {key} — unreadable/malformed content: {e}", file=sys.stderr)
+    except BaseException:
+        # Anything that escapes the per-object handling above (disk full,
+        # Ctrl-C, a real bug) means the export didn't finish — discard the
+        # partial .tmp rather than leave it looking like a real file.
+        if tmp_path:
+            out.close()
+            tmp_path.unlink(missing_ok=True)
+        raise
+    else:
+        if tmp_path:
+            out.flush()
+            os.fsync(out.fileno())
+            out.close()
+            tmp_path.rename(output_path)
+
+    label = source if proto is None else f"{source}/{proto}"
+    print(f"[{label}] Done: {objects_read} object(s), {rows_written} row(s) written"
+          f"{' to ' + str(output_path) if output_path else ''}."
+          f"{f' {objects_failed} object(s) SKIPPED after retries exhausted — export is incomplete.' if objects_failed else ''}",
+          file=sys.stderr)
+
+    # No audit-log entry. This tool reads; it changes nothing, and `_log/`
+    # exists to answer "what changed the archive, when". Writing an entry
+    # per export also meant the one read-only tool here was the one
+    # mutating the bucket — permanently, since these credentials cannot
+    # delete — every time someone piped an export into jq. Failures and
+    # skipped objects go to stderr, which the operator running this
+    # interactively is already watching, and still set exit code 2.
+    return objects_read, objects_failed, rows_written
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="nmea2s3-exporter", description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--source", choices=sorted(FIELDS), default="raw",
+                         help="Which archive to read: `raw` (captured traffic, the default) or "
+                              "`_log` (the operational audit log). They have different field sets — see SCHEMA.md")
+    parser.add_argument("--proto", metavar="NAME", default=None,
+                         help="With --source raw, export only this protocol (e.g. n2k, n0183). "
+                              "Filtered on the object NAME, so nothing else is downloaded at all — "
+                              "which matters because the protocols differ in volume by orders of "
+                              "magnitude. Default: every protocol, interleaved in one stream")
+    parser.add_argument("--format", choices=["csv", "ndjson"], default="ndjson",
+                         help="Output format (default: ndjson). _log's `details` field is nested — kept as "
+                              "real nested JSON in ndjson, flattened to a JSON string per cell in csv")
+    parser.add_argument("--since", type=parse_date, default=None, metavar="YYYY-MM-DD",
+                         help="First UTC date to include (default: everything — no lower bound)")
+    parser.add_argument("--until", type=parse_date, default=None, metavar="YYYY-MM-DD",
+                         help="Last UTC date (inclusive) to include (default: everything — no upper bound)")
+    parser.add_argument("-o", "--output", nargs="?", const="", default=None, metavar="PATH",
+                         help="Write output to this file instead of stdout. Bare -o with no PATH auto-names "
+                              "the file <timestamp>-<source>.<format> in the current directory")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                         help="Print one line per object read to stderr, not just the final summary")
+    parser.add_argument("--version", action="version", version=f"nmea2s3-exporter {__version__}")
+    args = parser.parse_args()
+    if args.proto and args.source != "raw":
+        parser.error("--proto only applies to --source raw; the audit log has no protocol")
+    config = load_config()
+
+    since = args.since or date.min
+    until = args.until or date.max
+
+    if args.output is None:
+        output_path = None
+    elif args.output == "":
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        what = args.proto or args.source
+        output_path = Path(f"{stamp}-{what}.{args.format}")
+    else:
+        output_path = Path(args.output)
+
+    s3 = make_s3_client(config["s3_endpoint_url"], config["s3_region"],
+                        config["s3_access_key_id"], config["s3_secret_access_key"])
+    _read, objects_failed, _rows = export_source(
+        s3, config["s3_bucket"], args.source, args.proto, since, until,
+        output_path, args.format, args.verbose)
+
+    # Exit 2 = the export completed but is INCOMPLETE: at least one object
+    # could not be read after retries. This was previously recorded only as
+    # a field inside an audit-log entry, so the process still exited 0 and
+    # no caller could act on it — SCHEMA.md documented an exit code that
+    # did not exist. A real code is what a shell or a cron wrapper can
+    # actually branch on.
+    if objects_failed:
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    # Writes no audit entry: `_log/` records what CHANGED the archive. A
+    # failed read changed nothing, and a traceback on the terminal of the
+    # person who just ran it is the right channel.
+    main()

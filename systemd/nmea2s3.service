@@ -1,0 +1,111 @@
+# nmea2s3 — install to /etc/systemd/system/nmea2s3.service
+#
+# This is a TEMPLATE. Three things need your values before it will start;
+# every one of them appears below as a literal to replace:
+#
+#   youruser   the account that owns the pipx install and the spool
+#   ExecStart  the absolute path pipx put the command at
+#              (`pipx list` or `which nmea2s3-logger` — usually
+#              ~/.local/bin/nmea2s3-logger)
+#   EnvironmentFile  where you put the filled-in copy of env.example
+#
+#   sudo install -Dm600 env /etc/nmea2s3/env      # credentials, root-only
+#   sudo sed -i "s/youruser/$USER/g" /etc/systemd/system/nmea2s3.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nmea2s3
+
+[Unit]
+Description=nmea2s3 — NMEA 2000 raw capture logger (SocketCAN -> S3)
+
+# ORDERING ONLY — deliberately no Wants=. Both of these are nice to have and
+# neither may block the logger from starting, because both can wait forever
+# on a boat with no internet:
+#
+#   network-online.target  pulls in a wait-online service that delays boot by
+#                          up to its timeout (90-120s) every time it cannot
+#                          reach anything. The logger does not need it: every
+#                          flush goes to the local spool first and a separate
+#                          loop uploads from there, so an outage at boot costs
+#                          nothing but a later upload.
+#
+#   time-sync.target       systemd-time-wait-sync waits INDEFINITELY for a
+#                          first NTP sync. That used to be worth it, because
+#                          frames stamped from an unsynced clock were garbage.
+#                          It no longer is: every frame now carries
+#                          CLOCK_MONOTONIC alongside its CLOCK_REALTIME `ts`,
+#                          so `ts - mono` dates the boot epoch and a late sync
+#                          is detectable after the fact.
+#
+# With After= alone these still order correctly if something else pulls them
+# in, and cost nothing when it does not.
+After=network-online.target time-sync.target
+
+# Keep trying, forever. systemd's default start limit (5 starts in 10s) puts a
+# service permanently in `failed` and STOPS restarting it — for a logger that
+# means silent, permanent data loss, far worse than a process that keeps
+# retrying. RestartSec=5 happens to stay under that default, but only by
+# accident; this says it outright. It lives in [Unit]: systemd moved
+# StartLimitIntervalSec here in v229 and ignores it in [Service].
+StartLimitIntervalSec=0
+
+[Service]
+User=youruser
+Group=youruser
+
+# Credentials only — see env.example. Keep this file mode 600 and owned by
+# root: the unit reads it as root before dropping to User=, so the logger's
+# own account never needs to be able to read the secret at all.
+EnvironmentFile=/etc/nmea2s3/env
+
+# The console script pipx installed. `--can can0` is the default and is
+# spelled out so the interface is visible in `systemctl status`.
+ExecStart=/home/youruser/.local/bin/nmea2s3-logger --can can0
+SyslogIdentifier=nmea2s3
+
+# Restarting cannot wedge the boot: multi-user.target is reached regardless,
+# the box comes up and you can still log in. A service that restarts is not a
+# boot loop.
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+
+# Security hardening. ReadWritePaths must name the spool directory
+# (NMEA2S3_DISK_DIR, default ~/n2k_fallback) — ProtectHome=read-only makes
+# every other path under /home unwritable, and a logger that cannot write
+# its spool has nowhere to put a frame.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/youruser/n2k_fallback
+PrivateTmp=yes
+
+# This is the most important service on the box: it is the only thing that can
+# capture a frame, and a frame missed is gone for good — everything downstream
+# reads from S3 and can be re-run at any time.
+#
+# Measured peak RSS on the real code, at the buffer cap:
+#
+#   idle (interpreter + boto3 + client) .....  65 MB
+#   steady state, 5 min @ 207 msg/s .........  90 MB
+#   buffer at MAX_BUFFER_BYTES (48 MB) ...... 191 MB
+#
+# MemoryMax is a runaway-bug backstop, NOT a capacity control, and it must
+# stay well clear of the application's own MAX_BUFFER_BYTES. The two degrade
+# very differently: the application cap sheds its oldest frames and keeps
+# running, while this one kills the process and loses the entire buffer. At
+# 128M this limit bound first and turned a graceful shed into a total loss.
+# 512M is ~2.7x the measured worst case.
+MemoryMax=512M
+
+# Prefer to kill almost anything else on the box before this. Under real
+# memory pressure with no swap, the kernel's OOM killer picks a victim by
+# score; this makes the logger a poor candidate.
+OOMScoreAdjust=-500
+
+# A share, not a cap: it only matters when something else wants the CPU too.
+# There is deliberately no CPUQuota — json encoding is ~0.1% of one core at
+# 207 msg/s, so a quota would only ever bind during a flush-and-gzip burst,
+# which is precisely the moment the CAN reader must not be throttled.
+CPUWeight=200
+
+[Install]
+WantedBy=multi-user.target

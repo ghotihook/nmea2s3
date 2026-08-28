@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nmea2s3"
+version = "0.2.0"
+description = "NMEA 2000 raw capture logger: SocketCAN frames to an S3-compatible bucket, with a local spool that survives outages"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ghotihook" }]
+keywords = ["nmea2000", "n2k", "socketcan", "can", "s3", "marine", "logger"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: No Input/Output (Daemon)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Archiving",
+]
+
+# boto3 and the stdlib, nothing else. This runs on a boat's SBC and has to
+# start unattended and stay up, so nothing heavier gets in: no decoding, no
+# database driver, no analysis stack. A lower bound rather than a pin —
+# a pinned application dependency in a pipx-installed tool only creates
+# conflicts it cannot resolve, and nothing here uses a recent boto3 feature.
+# One install, all three commands. boto3 is all the logger itself imports —
+# it never touches the decoders or the database driver, so the capture
+# process's memory footprint is unchanged by their presence. They are here
+# because an install that gives you two of the three commands and a message
+# about the third is a worse default than a slightly larger install.
+#
+# The cost is at install time, not run time, and it lands on the boat: an
+# SBC needs a wheel for its platform for each of these, or a compiler.
+dependencies = [
+    "boto3>=1.28",
+    "psycopg[binary]>=3.1",
+    "nmea2000>=2026.5.2",
+    "pynmea2>=1.19",
+]
+
+[project.urls]
+Homepage = "https://github.com/ghotihook/nmea2s3"
+Issues = "https://github.com/ghotihook/nmea2s3/issues"
+
+[project.scripts]
+nmea2s3-logger = "nmea2s3.logger:main"
+nmea2s3-exporter = "nmea2s3.export:main"
+nmea2s3-update-pg = "nmea2s3.pg.update:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nmea2s3"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/nmea2s3", "tests", "systemd", "README.md", "SCHEMA.md", "LICENSE", "env.example"]
