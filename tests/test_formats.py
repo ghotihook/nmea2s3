@@ -259,6 +259,148 @@ def test_log_objects_are_plain_uncompressed_json():
     assert b"\n  " in rec["body"], "indented for human reading"
 
 
+# ── the candump line the exporter writes ─────────────────────────────────
+#
+# Not an archive format, but an interface all the same: canboat parses these,
+# so the grammar is pinned here with everything else that outside tools read.
+
+CANDUMP_LINE = re.compile(
+    r"\A\((?P<epoch>\d+)\.(?P<usec>\d{6})\) (?P<iface>[A-Za-z0-9]+) "
+    r"(?P<canid>[0-9A-F]{8})#(?P<data>([0-9A-F]{2}){0,8})\Z")
+
+
+def _candump_row(**over):
+    row = {"ts": "2017-08-17T14:12:12.106111+00:00", "mono": 1.0,
+           "device_id": "sk", "src": "slcan0", "proto": "n2k",
+           "raw": "09f50374#000a00ffff00ffff"}
+    return {**row, **over}
+
+
+def test_the_candump_line_is_the_documented_grammar():
+    """The reference line, produced from a row. canboat reads these, so the
+    spacing, the parenthesised timestamp and the case are the interface."""
+    line = export.candump_line(_candump_row())
+    assert line == "(1502979132.106111) slcan0 09F50374#000A00FFFF00FFFF"
+    assert CANDUMP_LINE.fullmatch(line), line
+
+
+def test_candump_upcases_the_hex_and_pads_the_identifier():
+    """The archive stores lowercase and the identifier as written; the
+    grammar is 8 uppercase hex digits, extended-frame width, always."""
+    line = export.candump_line(_candump_row(raw="9f80102#a54dca182530bb1d"))
+    assert CANDUMP_LINE.fullmatch(line).group("canid") == "09F80102"
+    assert line.endswith("#A54DCA182530BB1D")
+
+
+def test_candump_microseconds_are_always_six_digits():
+    """`usec := 6DIGIT` — zero-padded, exactly six, whatever the value. A
+    bare `%d` writes `.6` for six microseconds, which reads as 600000."""
+    for usec in (0, 6, 106111, 999999):
+        row = _candump_row(ts=f"2026-08-28T21:13:39.{usec:06d}+00:00")
+        assert CANDUMP_LINE.fullmatch(export.candump_line(row)).group("usec") \
+            == f"{usec:06d}"
+
+
+def test_candump_round_trips_to_the_same_frame():
+    """Re-casing and padding must not change what the line decodes to —
+    otherwise canboat reads a different frame from the one captured."""
+    row = _candump_row()
+    m = CANDUMP_LINE.fullmatch(export.candump_line(row))
+    assert (decode.n2k(f"{m.group('canid')}#{m.group('data')}")
+            == decode.n2k(row["raw"]))
+
+
+def test_candump_names_the_interface_but_never_invents_one():
+    assert " slcan0 " in export.candump_line(_candump_row())
+    # A row imported from a database that predates the field has no source,
+    # and the grammar cannot say "unknown" — but `can0` would read as a real
+    # capture from a real interface ever after.
+    line = export.candump_line(_candump_row(src=None))
+    assert CANDUMP_LINE.fullmatch(line).group("iface") == "unknown"
+
+
+def test_candump_refuses_what_it_cannot_say():
+    """Each of these would otherwise become a line canboat parses as a
+    different frame. The exporter's per-object handler turns the exception
+    into a skip and a message on stderr."""
+    for bad in (_candump_row(proto="n0183", raw="$GPRMC,120000,A*6A"),
+                # Well-formed as a frame, and still not one: a protocol this
+                # build has never heard of has no CAN identifier either, and
+                # the guard is on `proto`, not on whether the hex parses.
+                _candump_row(proto="seatalk", raw="9c11#0011"),
+                _candump_row(raw="09f50374"),                 # no separator
+                _candump_row(raw="09f50374#000a0"),           # odd hex length
+                _candump_row(raw="09f50374#00zz00ff"),        # not hex
+                _candump_row(raw="09f50374#" + "aa" * 9),     # 9 data bytes
+                _candump_row(ts="2017-08-17T14:12:12.106111")):   # naive
+        try:
+            export.candump_line(bad)
+            assert False, f"should have been refused: {bad}"
+        except ValueError:
+            pass
+
+
+def test_candump_writes_one_bare_line_per_row():
+    """No header and no field list: unlike CSV, the line's shape comes from
+    the format canboat reads, not from this archive's columns."""
+    import io
+    out = io.StringIO()
+    write_row = export.make_writer(out, "candump", RAW_FIELDS)
+    for i in range(3):
+        write_row(_candump_row(ts=f"2017-08-17T14:12:1{i}.106111+00:00"))
+    lines = out.getvalue().splitlines()
+    assert len(lines) == 3, "a header would make this 4"
+    assert all(CANDUMP_LINE.fullmatch(l) for l in lines)
+    assert out.getvalue().endswith("\n")
+
+
+def _run_exporter(argv: list[str]):
+    """Drive main() with the network stubbed out, and report what it asked
+    export_source for. argparse writes its usage to stderr on a rejected
+    flag combination; swallowed here so the suite's own output stays
+    readable — the exit code is what is being asserted."""
+    import contextlib
+    import io
+    captured = {}
+
+    def fake_export_source(s3, bucket, source, proto, since, until,
+                            output_path, fmt, verbose):
+        captured.update(source=source, proto=proto, fmt=fmt, output=output_path)
+        return 0, 0, 0
+
+    saved = (sys.argv, export.make_s3_client, export.export_source)
+    sys.argv, export.make_s3_client, export.export_source = (
+        ["nmea2s3-exporter", *argv], lambda *a, **kw: object(), fake_export_source)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            export.main()
+    finally:
+        sys.argv, export.make_s3_client, export.export_source = saved
+    return captured
+
+
+def test_candump_narrows_to_n2k_before_anything_is_downloaded():
+    """--proto filters on the object NAME, so implying it here means the
+    objects a candump export cannot write are never fetched — rather than
+    downloaded, decompressed and then dropped a row at a time."""
+    assert _run_exporter(["--format", "candump"])["proto"] == "n2k"
+    assert _run_exporter(["--format", "candump", "--proto", "n2k"])["proto"] == "n2k"
+    # and the auto-named file says which protocol it holds
+    assert str(_run_exporter(["--format", "candump", "-o"])["output"]).endswith("-n2k.candump")
+
+
+def test_candump_refuses_the_exports_it_could_not_write():
+    """Refused at the flags, before a LIST: an audit entry and an 0183
+    sentence have no CAN frame in them at all."""
+    for argv in (["--format", "candump", "--source", "_log"],
+                 ["--format", "candump", "--proto", "n0183"]):
+        try:
+            _run_exporter(argv)
+            assert False, f"should have been refused: {argv}"
+        except SystemExit as e:
+            assert e.code == 2, "argparse usage error"
+
+
 # ── the data objects themselves ──────────────────────────────────────────
 
 def test_a_written_object_is_gzipped_ndjson_one_row_per_line():

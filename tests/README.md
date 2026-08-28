@@ -21,7 +21,7 @@ through the fakes in `helpers.py`.
 | `test_gzip.py` | RFC 1952 conformance, byte-reproducibility, content addressing, key layout |
 | `test_readback.py` | `iter_rows_ndjson_gz` — correctness and memory shape on multi-GB day objects |
 | `test_audit_log.py` | which tools write `_log/` entries, and which deliberately do not |
-| `test_formats.py` | row shapes, field types, key and filename layouts, object headers, and agreement with `SCHEMA.md` |
+| `test_formats.py` | row shapes, field types, key and filename layouts, object headers, the exporter's candump line, and agreement with `SCHEMA.md` |
 | `test_pg.py` | the wide table: bucket grid, `last()` and its tie-break, the range guard, and DDL that grows a column |
 
 ## Why these tests exist

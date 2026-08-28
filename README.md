@@ -149,7 +149,14 @@ before it starts dropping its oldest batch.
 nmea2s3-exporter | jq .                                    # everything, ndjson, to stdout
 nmea2s3-exporter --proto n0183 --since 2026-08-01 -o wk.ndjson   # one protocol
 nmea2s3-exporter --source _log --format csv -o             # audit log, auto-named file
+nmea2s3-exporter --format candump --since 2026-08-28 | candump2analyzer | analyzer -json
 ```
+
+`--format candump` writes the ASCII form `candump -L` writes and canboat
+reads — `(1502979132.106111) slcan0 09F50374#000A00FFFF00FFFF` — so a day
+out of the archive pipes straight into `analyzer` and nothing here has to
+learn what a PGN means. It is CAN frames, so it implies `--proto n2k`:
+0183 sentences carry no CAN identifier and the format has no way to say so.
 
 `--proto` filters on the object *name*, which a `LIST` already returned, so a
 narrowed export downloads nothing it will discard. That matters more than it

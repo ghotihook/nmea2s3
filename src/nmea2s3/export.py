@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""nmea2s3-exporter — read the archive back out as ndjson or CSV.
+"""nmea2s3-exporter — read the archive back out as ndjson, CSV or candump.
 
 Exports the captured archive (--source raw, the default) or the operational
-audit log (--source _log); --format picks between ndjson (default) and CSV.
+audit log (--source _log); --format picks between ndjson (default), CSV and
+candump — the ASCII form `candump -L` writes and canboat's
+candump2analyzer reads, so an archived day can be piped straight into
+`analyzer` without anything here learning what a PGN means.
 
 Reads the day-partitioned key layout SCHEMA.md defines —
 raw/<yyyy>/<mm>/<dd>/<HHMMSS>-<proto>-<cid>.ndjson.gz — and writes one
@@ -21,9 +24,9 @@ ndjson output keeps it nested, since ndjson supports that natively — one
 real reason to prefer --format csv for _log specifically if you want a
 flat file, since ndjson is otherwise the default everywhere.
 
-CSV and ndjson share the entire pipeline (listing, date filtering,
+Every format shares the entire pipeline (listing, date filtering,
 retry/skip) — only the final per-row write differs (see make_writer) — so
-this is one command with a --format switch rather than two that would
+this is one command with a --format switch rather than three that would
 drift apart.
 
 Defaults to stdout, ndjson, so `nmea2s3-exporter | less` or `| jq .` just
@@ -108,8 +111,74 @@ READERS = {
 }
 
 
+# The interface `raw` was captured from, for a row that does not name one.
+# Rows written by this logger always do; rows imported from a database that
+# predates it do not, and the grammar has no way to say "unknown". A word
+# that is obviously not an interface name beats inventing `can0`, which
+# would read as a real capture from a real interface ever after.
+UNKNOWN_IFACE = "unknown"
+
+
+def candump_line(row: dict) -> str:
+    """One archive row -> one line of candump ASCII.
+
+        (1502979132.106111) slcan0 09F50374#000A00FFFF00FFFF
+
+        line  := "(" epoch "." usec ") " iface " " canid "#" data
+        epoch := 1*DIGIT      -- whole seconds since 1970-01-01T00:00:00Z
+        usec  := 6DIGIT       -- zero-padded, exactly 6
+        iface := 1*(ALPHA / DIGIT)
+        canid := 8HEXDIG      -- uppercase, extended (29-bit) frame
+        data  := 0*16HEXDIG   -- uppercase, even length, 0-8 bytes
+
+    Nothing is decoded on the way out any more than on the way in: `raw`
+    already IS `<canid>#<data>`, so this re-cases it, pads the identifier
+    to the full 29-bit width and puts the timestamp back into the shape
+    candump wrote it in. What the frame MEANS is canboat's business.
+
+    Refuses a row of any other protocol rather than emitting something
+    canboat would misread: an 0183 sentence has no CAN identifier, and the
+    grammar has no way to say so.
+    """
+    proto = row.get("proto")
+    if proto != "n2k":
+        raise ValueError(f"candump is CAN frames; {proto!r} has no CAN identifier")
+
+    # The two halves are formatted separately, which is exact by
+    # construction. Formatting `ts.timestamp()` as one float would also work
+    # today — but only because a double still has room to spare at current
+    # POSIX timestamps: adjacent doubles sit 2.4e-7 s apart in 2026, which
+    # is fine against a microsecond, and that gap doubles at every power of
+    # two (4.8e-7 in 2038, 9.5e-7 in 2106, 1.9e-6 after that, where %.6f
+    # starts rounding to the wrong microsecond). Nothing here should depend
+    # on that argument being re-checked.
+    ts = datetime.fromisoformat(row["ts"])
+    if ts.tzinfo is None:
+        # .timestamp() would read it as local time and shift the whole
+        # export by the exporting machine's offset, silently.
+        raise ValueError(f"ts carries no timezone: {row['ts']!r}")
+    epoch = int(ts.replace(microsecond=0).timestamp())
+
+    id_hex, sep, data_hex = row["raw"].partition("#")
+    if not sep:
+        raise ValueError(f"raw is not <canid>#<data>: {row['raw']!r}")
+    can_id = int(id_hex, 16)
+    # Validated by decoding: bytes.fromhex refuses an odd length and any
+    # non-hex digit, so a corrupt row is skipped by the caller rather than
+    # written out as a line canboat will read as a different frame.
+    data = bytes.fromhex(data_hex)
+    if len(data) > 8:
+        raise ValueError(f"{len(data)} data bytes; a CAN frame carries at most 8")
+
+    iface = row.get("src") or UNKNOWN_IFACE
+    return (f"({epoch}.{ts.microsecond:06d}) {iface} "
+            f"{can_id:08X}#{data.hex().upper()}")
+
+
 def make_writer(out, fmt: str, fieldnames: list[str]):
-    """Return a write_row(row) callable for the chosen format. CSV writes
+    """Return a write_row(row) callable for the chosen format. candump
+    writes no header and ignores fieldnames — its line is fixed by the
+    format canboat reads, not by this archive's columns. CSV writes
     a header immediately and flattens any nested value (just _log's
     `details`, currently) to a JSON string, since a CSV cell can't hold a
     nested structure. ndjson writes one json.dumps line per row and keeps
@@ -128,6 +197,11 @@ def make_writer(out, fmt: str, fieldnames: list[str]):
     if fmt == "ndjson":
         def write_row(row: dict) -> None:
             out.write(json.dumps(row, separators=(",", ":")) + "\n")
+        return write_row
+
+    if fmt == "candump":
+        def write_row(row: dict) -> None:
+            out.write(candump_line(row) + "\n")
         return write_row
 
     raise ValueError(f"unknown format: {fmt!r}")
@@ -232,9 +306,12 @@ def main():
                               "Filtered on the object NAME, so nothing else is downloaded at all — "
                               "which matters because the protocols differ in volume by orders of "
                               "magnitude. Default: every protocol, interleaved in one stream")
-    parser.add_argument("--format", choices=["csv", "ndjson"], default="ndjson",
+    parser.add_argument("--format", choices=["candump", "csv", "ndjson"], default="ndjson",
                          help="Output format (default: ndjson). _log's `details` field is nested — kept as "
-                              "real nested JSON in ndjson, flattened to a JSON string per cell in csv")
+                              "real nested JSON in ndjson, flattened to a JSON string per cell in csv. "
+                              "candump writes `(epoch.usec) iface CANID#DATA`, what `candump -L` writes and "
+                              "canboat's candump2analyzer reads; it is CAN frames only, so it implies "
+                              "--proto n2k")
     parser.add_argument("--since", type=parse_date, default=None, metavar="YYYY-MM-DD",
                          help="First UTC date to include (default: everything — no lower bound)")
     parser.add_argument("--until", type=parse_date, default=None, metavar="YYYY-MM-DD",
@@ -248,6 +325,16 @@ def main():
     args = parser.parse_args()
     if args.proto and args.source != "raw":
         parser.error("--proto only applies to --source raw; the audit log has no protocol")
+    if args.format == "candump":
+        # A candump line is one CAN frame, so the export has to be one
+        # protocol whatever the user asked for. Narrowing it here rather
+        # than dropping rows later keeps the promise --proto already makes:
+        # what cannot be written is never downloaded.
+        if args.source != "raw":
+            parser.error("--format candump reads captured frames; --source _log has none")
+        if args.proto not in (None, "n2k"):
+            parser.error(f"--format candump is CAN frames; --proto {args.proto} has none")
+        args.proto = "n2k"
     config = load_config()
 
     since = args.since or date.min
