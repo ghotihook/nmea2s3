@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H                                              # noqa: E402
 
 try:
-    from nmea2s3.pg import bucket, table
+    from nmea2s3.pg import bucket, table, wire_n2k
 except ImportError as e:                                          # pragma: no cover
     raise unittest.SkipTest(f"decoder stack not importable: {e}")
 
@@ -67,6 +67,37 @@ def _system_time(prio: int, src: int, when: datetime, source: int = 0) -> str:
     payload = (bytes([0x01, source]) + days.to_bytes(2, "little")
                + (secs * 10000).to_bytes(4, "little"))
     return f"{can_id:08x}#{payload.hex()}"
+
+
+def _fast_packet(can_id: int, data: bytes, seq: int = 0) -> list[str]:
+    """A fast-packet PGN split into the frames it actually travels as.
+
+    Six payload bytes in the first frame behind a counter and a length, seven
+    in each one after. Built properly rather than faked, because wire_n2k
+    reassembles across calls and holds partial state — a test feeding one
+    whole message would not exercise the thing most likely to break.
+    """
+    out = [bytes([(seq << 5), len(data)]) + data[:6]]
+    rest, n = data[6:], 0
+    while rest:
+        n += 1
+        out.append(bytes([(seq << 5) | n]) + rest[:7])
+        rest = rest[7:]
+    return [f"{can_id:08x}#{f.hex()}" for f in out]
+
+
+def _gnss_position(prio: int, src: int, gnss_type: int = 1,
+                    method: int = 2, integrity: int = 1) -> list[str]:
+    """PGN 129029 (GNSS Position Data), the fix and how good it is.
+
+    gnssType, method and integrity are LOOKUPs — numbers whose meanings live
+    in a table. method 2 is `DGNSS fix`, integrity 1 is `Safe`.
+    """
+    data = bytearray(43)
+    data[31] = ((method & 0x0F) << 4) | (gnss_type & 0x0F)
+    data[32] = integrity & 0x03
+    can_id = (prio << 26) | (1 << 24) | (0xF8 << 16) | (0x05 << 8) | src
+    return _fast_packet(can_id, bytes(data))
 
 
 def _rmc(when: datetime) -> str:
@@ -289,6 +320,58 @@ def test_two_gps_units_are_arbitrated_like_any_other_field():
     b.add(_rec(T0 + timedelta(milliseconds=10), "n2k", _system_time(2, 9, early)))
     assert b.rows()[0]["n2k_gps_time_gps"] == early.timestamp(), \
         "the better-priority device wins the bucket, later sample or not"
+
+
+# ── lookups ──────────────────────────────────────────────────────────────
+
+def test_a_lookup_reaches_a_column_as_its_code():
+    """A LOOKUP is a number whose meanings live in a table. The library
+    resolves it to text, which is not a DOUBLE PRECISION, so every one of
+    them used to be dropped on the floor — taking `method`, the GNSS fix
+    quality, with it. Exactly what you reach for when a position looks wrong.
+
+    The code is stored, never the resolved text: it is the raw reading, and
+    it leaves the enum where a wrong entry is a fix rather than something
+    frozen into rows that are never rewritten.
+    """
+    b = bucket.Buckets(timedelta(seconds=1))
+    for raw in _gnss_position(3, 2, gnss_type=1, method=2, integrity=1):
+        b.add(_rec(T0, "n2k", raw))
+    row = b.rows()[0]
+    assert row["n2k_method_code"] == 2, "DGNSS fix is code 2"
+    assert row["n2k_gnsstype_code"] == 1
+    assert row["n2k_integrity_code"] == 1
+    assert all(isinstance(v, (int, float)) for k, v in row.items() if k != "ts"), \
+        "a column is DOUBLE PRECISION — no resolved text may reach one"
+
+
+def test_frame_metadata_lookups_do_not_become_columns():
+    """manufacturerCode and industryCode head 314 and 313 PGNs between them,
+    and say nothing about anything measured. A column each would bury the
+    handful of lookups worth having, so they are skipped by name — the lookup
+    equivalent of `sid`."""
+    from nmea2000.consts import FieldTypes
+    from nmea2000.message import NMEA2000Field
+
+    def field(fid, value, raw):
+        return NMEA2000Field(fid, fid, None, None, value, raw, None,
+                             FieldTypes.LOOKUP, False)
+
+    class FakeMsg:
+        PGN = 130824
+        fields = [field("manufacturerCode", "Simrad", 1857),
+                  field("industryCode", "Marine Industry", 4),
+                  field("mode", "Automatic", 3)]
+
+    saved = wire_n2k._decoder
+    wire_n2k._decoder = type("D", (), {"decode": staticmethod(lambda line: FakeMsg())})()
+    try:
+        _disc, values = wire_n2k.decode_frame(0x09F80102, "00")
+    finally:
+        wire_n2k._decoder = saved
+
+    assert values == {"mode_code": 3.0}, \
+        f"only the measured lookup should survive, got {values}"
 
 
 # ── the table, driven through a fake connection ──────────────────────────

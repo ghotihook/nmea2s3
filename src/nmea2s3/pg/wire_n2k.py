@@ -18,14 +18,20 @@ and the +/-180 wind fold are the originals from the pipeline this was
 ported out of; a change here changes a column name, so they are copied
 rather than rewritten.
 
-ONLY NUMBERS SURVIVE. A column is DOUBLE PRECISION (see table.py), so the
-loop below keeps a field only when its value is an int or a float. The
-library hands back real objects for some field types — `datetime.date` and
-`datetime.time` for DATE/TIME, `str` for LOOKUP — and every one of those is
-dropped here, silently. That is a real filter with real casualties, not a
-formality: it is why `method` (the GNSS fix quality) never reaches a column,
-and it is why PGN 126992 System Time, whose entire purpose is a clock,
-contributed nothing whatsoever until GPS_TIME_PGNS below.
+ONLY NUMBERS SURVIVE. A column is DOUBLE PRECISION (see table.py), so a
+field reaches one only as an int or a float. The library hands back real
+objects for some field types — `datetime.date`/`datetime.time` for DATE and
+TIME, `str` for LOOKUP — and until 2026-08-30 every one of those was dropped
+here, silently. That filter had real casualties: `method`, the GNSS fix
+quality, never reached a column, and PGN 126992 System Time, whose entire
+purpose is a clock, contributed nothing whatsoever.
+
+Both are now converted rather than discarded, each into the one number that
+carries what the field actually said — see GPS_TIME_PGNS and SKIP_LOOKUPS
+below. Anything left over is still dropped: BITLOOKUP is several meanings at
+once and wants a mask, not a code, and INDIRECT_LOOKUP means nothing without
+the field it depends on. Both would need a naming rule of their own, so they
+wait until something needs them.
 
 The exception is that clock, because `ts` is only as good as the capture
 box's own clock and this is the archive's independent check on it. The GPS
@@ -45,6 +51,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from nmea2000.consts import FieldTypes
 from nmea2000.decoder import NMEA2000Decoder
 
 from ..decode import n2k as n2k_frame
@@ -71,6 +78,28 @@ SKIP_FIELDS = {"sid"}
 #                               GPS one is emitted under this name.
 GPS_TIME_PGNS = {126992, 129029}
 CLOCK_FIELDS = ("date", "time")
+
+# A LOOKUP is a number whose meanings live in a table — `method` 2 is a DGNSS
+# fix. The CODE is what gets stored, never the resolved text: it is the raw
+# reading, it fits the one column type, and it leaves the table's meaning
+# where it can still be corrected instead of freezing today's enum into rows
+# that are never rewritten. Same argument as storing `raw` and deriving `pgn`.
+# Suffixed `_code` because it is an ordinal, not a measurement — avg() of a
+# fix quality is nonsense in a way avg() of a satellite count is not.
+#
+# An unrecognised code resolves to None and is dropped by the loop's first
+# line, along with genuinely absent fields. That costs a code this build has
+# not learned yet, and buys not filling a column with the all-ones sentinel
+# an unavailable lookup carries; the two are indistinguishable without the
+# field's bit width, which the library does not expose.
+LOOKUP_SUFFIX = "_code"
+
+# Lookups that describe the FRAME rather than anything measured — the lookup
+# equivalent of `sid`. Skipped by name, because they are the commonest of all
+# (manufacturerCode and industryCode head every proprietary PGN, 314 and 313
+# of them) and a column each would bury the handful worth having.
+SKIP_LOOKUPS = {"manufacturerCode", "industryCode", "proprietaryId",
+                "messageId", "repeatIndicator"}
 
 _MS_TO_KN = 1.94384
 
@@ -137,6 +166,10 @@ def decode_frame(can_id: int, data: str) -> tuple[dict, dict[str, float]] | None
             # date/time come back as datetime objects, which the numeric
             # filter below drops. Held here and combined after the loop.
             clock[f.id] = f.value
+        elif f.type is FieldTypes.LOOKUP:
+            # .value is the resolved text and .raw_value the code behind it.
+            if f.id not in SKIP_LOOKUPS and isinstance(f.raw_value, int):
+                values[f.id + LOOKUP_SUFFIX] = float(f.raw_value)
         elif isinstance(f.value, (int, float)) and not isinstance(f.value, bool):
             v = float(f.value)
             values[f.id] = CONVERSIONS[f.id](v) if f.id in CONVERSIONS else v

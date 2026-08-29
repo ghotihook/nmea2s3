@@ -85,6 +85,18 @@ SELECT
     COALESCE(n2k_actualtemperature_0_sea_temperature, mda_water_temp)     AS temp_sea,
     COALESCE(n2k_voltage_0, xdr_battv)                                    AS batt_v,
 
+    -- how good the fix is, which is what you want the moment a position
+    -- looks wrong. Stored as the CODE the receiver reported, not the text:
+    --   method    0 no GNSS, 1 GNSS fix, 2 DGNSS, 3 precise, 4 RTK fixed,
+    --             5 RTK float, 6 estimated (DR), 7 manual, 8 simulate
+    --   integrity 0 none, 1 safe, 2 caution, 3 unsafe
+    -- Left as codes here too. Spelling them out in SQL would freeze one
+    -- reading of the enum into a view, and the code is what the instrument
+    -- actually said — `CASE gnss_method_code WHEN 2 THEN ...` wherever you
+    -- want words. An ordinal, so never average it.
+    n2k_method_code                                                       AS gnss_method_code,
+    n2k_integrity_code                                                    AS gnss_integrity_code,
+
     -- the GPS clock itself, POSIX seconds. An independent time reference
     -- riding inside the data, which is the only one a box with no RTC has —
     -- `ts` is CLOCK_REALTIME and only as good as that box's clock was.

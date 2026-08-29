@@ -224,6 +224,16 @@ turn up as columns on the next run, NULL for the rows that predate it. That
 is only safe because this database is derived and disposable; everything in
 it rebuilds from the archive.
 
+**A lookup is stored as its code.** N2K carries enumerated fields — GNSS fix
+quality, integrity, reference type — whose meanings live in a table. The
+column holds the number (`n2k_method_code` = 2), never the resolved text: it
+is what the instrument actually said, it fits one column type, and it leaves
+the enum where a wrong entry is a fix rather than something frozen into rows
+that are never rewritten. Spell it out in SQL. The lookups that describe the
+*frame* rather than a measurement — `manufacturerCode`, `industryCode` and
+three more — are skipped, since between them they head almost every
+proprietary PGN and a column each would bury the ones worth having.
+
 **Columns are `proto_field`, one per decoded field.** `n2k_sog`,
 `rmc_spd_over_grnd` and `vtg_spd_over_grnd_kts` are three columns, not one.
 Nothing picks a winner *between columns* — which instrument you trust is a
