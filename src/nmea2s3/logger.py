@@ -26,9 +26,14 @@ at capture time. An RTC-less SBC has no correct clock until its first NTP
 sync, so frames captured before that sync carry a wrong-but-plausible-looking
 timestamp; TIMESTAMP_FLOOR below only catches the common case (a clock still
 near its pre-sync default), counted as `bad_clock` in the stats line, never
-dropped. The real fix lives in systemd/nmea2s3.service, which orders
-startup after time-sync.target — or fit a hardware RTC module to remove the
-failure mode outright. See SCHEMA.md for the full writeup.
+dropped. Capture deliberately does NOT wait for NTP: the unit's
+After=time-sync.target is ordering only and nothing here pulls that target
+in, because the service which would blocks forever on a boat with no
+internet — and a logger that never starts loses everything, where one
+starting on a wrong clock misfiles a few objects and records enough to prove
+it. Fit a hardware RTC module to remove the failure mode outright; short of
+one, every frame carries the evidence instead. See SCHEMA.md for the full
+writeup.
 
 What TIMESTAMP_FLOOR cannot catch — a clock wrong by minutes or hours rather
 than years — the second clock records. Every frame carries CLOCK_MONOTONIC
@@ -38,19 +43,20 @@ the step size when NTP corrects it. That pair is also the only way to tell a
 clock correction apart from a genuinely quiet bus — identical in `ts` alone.
 
 This file makes NO judgement about the clock. It records both readings and
-writes every batch to `n2k/`; deciding whether a timestamp is trustworthy
+writes every batch to `raw/`; deciding whether a timestamp is trustworthy
 is analysis's job, and analysis has both clocks on every row plus the boot
 epoch in the startup audit entry. An earlier version routed suspect batches
 to a separate `n2k_quarantine/` prefix, which was deleted 2026-08-24 for
 three reasons: it did not fix the thing it existed for (a quarantined
 object is still filed under whatever day the bad clock believed — the
-prefix only hides it from the default read path); the window it guarded is
-closed by the unit file ordering startup after time-sync.target, after
-which a correction is a slew of milliseconds and cannot change the day; and
-answering "is the clock right" needed `timedatectl`, the only subprocess
-and the only systemd coupling in the capture path, whose semantics were
-subtle enough to produce two bugs in two days. Keeping the logger dumb is
-worth more than a verdict that was neither sufficient nor cheap.
+prefix only hides it from the default read path); the same finding is
+recoverable on read for nothing, since `mono` is on every frame and the
+boot epoch is in the start audit entry, so the verdict spent storage layout
+restating what the rows already said; and answering "is the clock right"
+needed `timedatectl`, the only subprocess and the only systemd coupling in
+the capture path, whose semantics were subtle enough to produce two bugs in
+two days. Keeping the logger dumb is worth more than a verdict that was
+neither sufficient nor cheap.
 
 S3 is the permanent store; the buffer/spool below exist only to survive
 outages between here and there, not as long-term storage.

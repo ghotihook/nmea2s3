@@ -189,9 +189,28 @@ The residual risk is filing: the key and the spool filename both derive from
 `ts`, so a batch captured on a wrong clock files itself under whatever day
 that clock believed — and if the logger's key cannot delete, as the README
 recommends, a badly filed object can only be shadowed, never removed.
-Configuration closes that window: `systemd/nmea2s3.service` orders startup
-after `time-sync.target`, and after the first sync a correction is
-milliseconds and cannot change the day.
+
+That window is open, deliberately. `systemd/nmea2s3.service` carries
+`After=time-sync.target` but no `Wants=`, and `After=` is ordering only — it
+does nothing unless something else on the box pulls the target in, which
+nothing here does. The unit that would, `systemd-time-wait-sync.service`,
+blocks indefinitely on a first sync, so on a boat with no internet it does
+not delay capture, it prevents it. A logger that never starts loses
+everything; one that starts on a wrong clock misfiles its first few objects
+and records enough to prove it. Capture does not wait, and does not judge.
+
+A hardware RTC is what closes the window. What makes it survivable without
+one is that nothing is discarded. `mono` on every frame and `clock_epoch` in
+the start audit entry identify which clock basis a run was stamped against,
+and where the archive carries NMEA 0183 RMC, the sentences hold an
+independent UTC reference of their own — `nmea2s3-update-pg` measures the
+capture clock against it and stores the difference as an ordinary field,
+`rmc_clock_offset`, surfaced by `sql/metrics.sql` as `clock_offset`. A step
+there is the system clock moving.
+
+Nothing in this project drops, rejects or errors on a row because of any of
+that. The readings are recorded and the judgement is left to whoever is
+asking — which is the same rule the logger follows, applied one layer up.
 
 `mono` is stored raw rather than as the derived `ts − mono` epoch. The
 derived form compresses far better but freezes a rounding and refresh policy

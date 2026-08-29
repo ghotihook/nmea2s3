@@ -137,7 +137,13 @@ Meanwhile the logger prints a line a minute:
   growing means S3 is unreachable, which is survivable and expected offshore.
 - `dropped` should stay 0. Non-zero means data was evicted and is gone.
 - `epoch` is `ts - mono`; it should be constant. A jump is NTP correcting the
-  clock.
+  clock. Nothing waits for NTP — an RTC-less box that boots with a wrong
+  clock captures happily and files those first objects under the day it
+  believed, and a content-addressed key cannot be rewritten. Fit a hardware
+  RTC if that matters to you; short of one, `mono` on every frame makes the
+  jump visible after the fact, and `nmea2s3-update-pg` records the capture
+  clock's disagreement with GPS as `clock_offset`. Nothing anywhere drops a
+  row over it.
 
 Set `NMEA2S3_DISK_DIR` to a persistent mount with room to spare — never
 tmpfs. The spool holds 2 GB, roughly 6 days at a busy bus's frame rate,
