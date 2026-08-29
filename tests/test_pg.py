@@ -203,17 +203,29 @@ def test_column_names_are_proto_field():
 # ── the table, driven through a fake connection ──────────────────────────
 
 class FakeCon:
-    """Records SQL. `columns` is what information_schema will claim exists."""
+    """Records SQL. `columns` is what the catalogue will claim exists.
 
-    def __init__(self, columns=()):
+    `elsewhere` is a same-named table in ANOTHER schema, which only a query
+    matching on the bare name can see — see the two branches below, and
+    test_a_same_named_table_in_another_schema_cannot_suppress_a_column.
+    """
+
+    def __init__(self, columns=(), elsewhere=()):
         self.sql = []
         self.columns = list(columns)
+        self.elsewhere = list(elsewhere)
         self.copied = []
 
     def execute(self, q, params=None):
         self.sql.append(" ".join(q.split()))
-        if "information_schema.columns" in q:
+        if "to_regclass" in q:
+            # search_path resolves to ONE relation, whatever else shares its
+            # name.
             return [(c,) for c in self.columns]
+        if "information_schema.columns" in q:
+            # Matched on `table_name` alone, so every schema's table of that
+            # name answers at once.
+            return [(c,) for c in self.columns + self.elsewhere]
         return []
 
     def cursor(self):
@@ -241,10 +253,28 @@ def test_a_missing_column_is_added():
     con = FakeCon(columns=["ts", "n2k_sog"])
     added = table.ensure(con, "observations", ["n2k_sog", "mwv_wind_angle_r"])
     assert added == ["mwv_wind_angle_r"]
-    assert any("ALTER TABLE observations ADD COLUMN mwv_wind_angle_r DOUBLE PRECISION"
-               in s for s in con.sql)
+    assert any("ALTER TABLE observations ADD COLUMN IF NOT EXISTS "
+               "mwv_wind_angle_r DOUBLE PRECISION" in s for s in con.sql)
     assert not any("ADD COLUMN n2k_sog" in s for s in con.sql), \
         "an existing column must not be re-added"
+
+
+def test_a_same_named_table_in_another_schema_cannot_suppress_a_column():
+    """The DDL resolves through search_path to one relation; the lookup that
+    decides whether to emit it must resolve the same way.
+
+    `information_schema.columns WHERE table_name = %s` did not — it matched
+    the bare name in every schema and returned the union, so an old
+    `public.observations` holding a column made `ensure` skip adding that
+    column to the `"$user".observations` actually being written. The COPY
+    then failed with `column does not exist`, which is the precise failure
+    `ensure` exists to prevent, and it repeated every run because the union
+    never changed.
+    """
+    con = FakeCon(columns=["ts"], elsewhere=["n2k_sog"])
+    added = table.ensure(con, "observations", ["n2k_sog"])
+    assert added == ["n2k_sog"], "a column this table lacks must still be added"
+    assert any("ADD COLUMN" in s and "n2k_sog" in s for s in con.sql)
 
 
 def test_a_field_id_that_would_break_the_ddl_is_refused():

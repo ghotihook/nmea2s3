@@ -55,17 +55,36 @@ def ensure(con, table: str, fields) -> list[str]:
     fails with "column does not exist" — an error naming the new column but
     saying nothing about the missing migration. Gaining an instrument is
     the most likely change here, so it must not read as a bug.
+
+    The lookup therefore has to resolve the same relation the DDL around it
+    does. `to_regclass` applies search_path and names exactly ONE table —
+    the one the ALTER will touch — where the previous
+    `information_schema.columns WHERE table_name = %s` matched a bare NAME
+    across every schema at once. With two `observations` on the path (an old
+    `public` one beside a fresh `"$user"` one, say) that returned the UNION
+    of their columns, so a column existing only in the table nobody writes to
+    suppressed the ALTER on the table everybody writes to — reintroducing
+    the exact COPY failure above, and permanently, since the next run reads
+    the same union and skips the same column again. information_schema also
+    hides what the current role holds no privilege on, which is the same
+    mistake pointing the other way.
+
+    ADD COLUMN IF NOT EXISTS backs that up: `added` is what this run believes
+    it changed, and a belief that is somehow still wrong must not turn into a
+    failed run.
     """
     check_name(table)
     con.execute(f"CREATE TABLE IF NOT EXISTS {table} "
                 f"(ts TIMESTAMPTZ NOT NULL, PRIMARY KEY (ts))")
     have = {r[0] for r in con.execute(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_name = %s", (table,))}
+        "SELECT attname FROM pg_attribute "
+        "WHERE attrelid = to_regclass(%s) AND attnum > 0 AND NOT attisdropped",
+        (table,))}
     added = []
     for field in sorted(fields):
         if check_name(field) not in have:
-            con.execute(f"ALTER TABLE {table} ADD COLUMN {field} {VALUE_TYPE}")
+            con.execute(f"ALTER TABLE {table} "
+                        f"ADD COLUMN IF NOT EXISTS {field} {VALUE_TYPE}")
             added.append(field)
     if added:
         log.warning("%s gained %d column(s): %s — NULL for existing rows "
