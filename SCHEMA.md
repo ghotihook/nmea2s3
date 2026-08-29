@@ -198,6 +198,24 @@ derived form compresses far better but freezes a rounding and refresh policy
 into an archive kept forever, for ~1 GB/year at a busy bus's frame rate.
 Readers that trust their clock may ignore `mono` entirely.
 
+## Capacity and eviction
+
+Both buffers shed their **oldest** end when full, never the newest:
+
+- The RAM buffer is capped (48 MB of serialized rows); past it, the oldest
+  not-yet-written frames are dropped first.
+- The spool is capped (2 GB); past it, the oldest spool file — the oldest
+  not-yet-uploaded batch — is deleted first.
+
+Losing the oldest beats losing the newest, and either beats the alternative:
+an OOM kill that loses the entire buffer at once. The RAM cap is a backstop
+against the cgroup `MemoryMax` binding first; the spool is the real outage
+mechanism and holds days. The spool must be a persistent mount, never tmpfs —
+it is the only copy of a batch between a flush and its upload. The spool is a
+periodic spool, not a write-ahead log: a power cut loses whatever is still in
+RAM. Evictions from both buffers count into the same `dropped` figure, so it
+never under-reports what was actually lost.
+
 ## `_log` (operational audit log)
 
 Prefix `_log/...` — **outside `raw/`**, because it is not capture data. Same
