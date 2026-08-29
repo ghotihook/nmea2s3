@@ -141,9 +141,9 @@ Meanwhile the logger prints a line a minute:
   clock captures happily and files those first objects under the day it
   believed, and a content-addressed key cannot be rewritten. Fit a hardware
   RTC if that matters to you; short of one, `mono` on every frame makes the
-  jump visible after the fact, and `nmea2s3-update-pg` records the capture
-  clock's disagreement with GPS as `clock_offset`. Nothing anywhere drops a
-  row over it.
+  jump visible after the fact, and `nmea2s3-update-pg` stores the GPS clock
+  beside `ts` as `gps_time` — from N2K and 0183 alike — so a row stamped by
+  a wrong clock is one predicate away. Nothing anywhere drops a row over it.
 
 Set `NMEA2S3_DISK_DIR` to a persistent mount with room to spare — never
 tmpfs. The spool holds 2 GB, roughly 6 days at a busy bus's frame rate,
@@ -244,6 +244,24 @@ device that goes quiet loses the next bucket outright.
 would need to know which fields are angles (the mean of 359° and 1° is 180°),
 and this table adds columns for fields nobody has declared. Take a mean in
 SQL, where you can say which columns are bearings.
+
+**The GPS clock is a column, so `ts` can be checked.** `ts` is the kernel's
+capture time — `CLOCK_REALTIME`, only as good as the logger's own clock was.
+Both protocols carry an independent UTC reference (N2K PGNs 129029 and
+126992, and 0183 RMC), and all of them resolve to one `gps_time` in
+`metrics_1s`. Nothing compares the two for you, because how far apart is too
+far is a question about what you are asking:
+
+```sql
+SELECT * FROM metrics_1s
+ WHERE gps_time IS NOT NULL
+   AND abs(extract(epoch FROM ts) - gps_time) < 2;
+```
+
+A small *positive* offset is normal — the frame is stamped on receipt, one
+transmission time after the fix it reports. `gps_time IS NULL` means no GPS
+reported into that bucket, which is not the same finding as a disagreement.
+The foot of `sql/metrics.sql` has both queries and the reasoning.
 
 Ingest is **exactly-once by object**: keys are content-addressed, so a
 ledger table of consumed keys makes it safe to run on a cron over an

@@ -17,6 +17,24 @@ shape that becomes a column name directly. Field naming, unit conversion
 and the +/-180 wind fold are the originals from the pipeline this was
 ported out of; a change here changes a column name, so they are copied
 rather than rewritten.
+
+ONLY NUMBERS SURVIVE. A column is DOUBLE PRECISION (see table.py), so the
+loop below keeps a field only when its value is an int or a float. The
+library hands back real objects for some field types — `datetime.date` and
+`datetime.time` for DATE/TIME, `str` for LOOKUP — and every one of those is
+dropped here, silently. That is a real filter with real casualties, not a
+formality: it is why `method` (the GNSS fix quality) never reaches a column,
+and it is why PGN 126992 System Time, whose entire purpose is a clock,
+contributed nothing whatsoever until GPS_TIME_PGNS below.
+
+The exception is that clock, because `ts` is only as good as the capture
+box's own clock and this is the archive's independent check on it. The GPS
+date and time are combined into ONE POSIX-seconds float, `gps_time`, which
+is a number and so rides the ordinary path from here on — bucketed,
+arbitrated between devices by priority and source address, and stored like
+any other reading. Compare it against `ts` in SQL; nothing here judges it.
+A double holds 238 ns at present epochs, against the 0.1 ms the wire
+carries, so nothing is lost by the encoding.
 """
 
 from __future__ import annotations
@@ -24,6 +42,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from nmea2000.decoder import NMEA2000Decoder
@@ -38,6 +57,20 @@ _decoder = NMEA2000Decoder()
 # (e.g. 130306 `reference` -> apparent vs true wind).
 DISCRIMINATORS = {"reference", "source", "instance", "type", "temperatureSource"}
 SKIP_FIELDS = {"sid"}
+
+# PGNs whose `date` + `time` are a GPS clock worth keeping. Named explicitly
+# rather than keyed on the field ids alone, because other PGNs carry a `date`
+# and a `time` that are not one — 129033 Local Time Offset, for instance.
+#
+#   129029 GNSS Position Data — unambiguous, and the one to prefer.
+#   126992 System Time        — the same fields, but its `source` can be a
+#                               local crystal clock, which is the capture
+#                               box's own clock read back and therefore
+#                               circular. `source` is a discriminator, so
+#                               those land in a column of their own; only the
+#                               GPS one is emitted under this name.
+GPS_TIME_PGNS = {126992, 129029}
+CLOCK_FIELDS = ("date", "time")
 
 _MS_TO_KN = 1.94384
 
@@ -71,6 +104,17 @@ def _frame_to_line(can_id: int, data: str) -> str:
     )
 
 
+def _posix(day, time_of_day) -> float:
+    """A GPS date and time -> POSIX seconds, UTC.
+
+    One float rather than two columns, because the pair is one reading and
+    half of it answers nothing. Rounded to microseconds like `mono`, which is
+    four orders finer than the 0.1 s wire resolution and well inside what a
+    double resolves at these magnitudes.
+    """
+    return round(datetime.combine(day, time_of_day, timezone.utc).timestamp(), 6)
+
+
 def decode_frame(can_id: int, data: str) -> tuple[dict, dict[str, float]] | None:
     """Return (discriminators, {field_id: converted_value}) or None."""
     try:
@@ -83,14 +127,23 @@ def decode_frame(can_id: int, data: str) -> tuple[dict, dict[str, float]] | None
 
     disc: dict[str, Any] = {}
     values: dict[str, float] = {}
+    clock: dict[str, Any] = {}
     for f in msg.fields:
         if f.value is None or f.id in SKIP_FIELDS or "reserved" in f.id.lower():
             continue
         if f.id in DISCRIMINATORS:
             disc[f.id] = f.value
+        elif f.id in CLOCK_FIELDS and msg.PGN in GPS_TIME_PGNS:
+            # date/time come back as datetime objects, which the numeric
+            # filter below drops. Held here and combined after the loop.
+            clock[f.id] = f.value
         elif isinstance(f.value, (int, float)) and not isinstance(f.value, bool):
             v = float(f.value)
             values[f.id] = CONVERSIONS[f.id](v) if f.id in CONVERSIONS else v
+
+    if len(clock) == len(CLOCK_FIELDS) and (
+            msg.PGN != 126992 or disc.get("source") == "GPS"):
+        values["gps_time"] = _posix(clock["date"], clock["time"])
 
     # Boat-referenced wind angles fold to +/-180 so port is negative; the
     # ground-referenced one is a compass bearing and stays 0-360.

@@ -54,6 +54,28 @@ def _n2k(prio: int, src: int, sog_kn: float) -> str:
     return f"{can_id:08x}#{payload.hex()}"
 
 
+def _system_time(prio: int, src: int, when: datetime, source: int = 0) -> str:
+    """A PGN 126992 (System Time) frame carrying a GPS clock.
+
+    `source` is the frame's own clock source, 0 = GPS. Anything else is the
+    capture box's own clock read back — a local crystal, say — which must not
+    reach the column a reader compares `ts` against.
+    """
+    can_id = (prio << 26) | (0x1F010 << 8) | src
+    days = (when.date() - datetime(1970, 1, 1, tzinfo=timezone.utc).date()).days
+    secs = when.hour * 3600 + when.minute * 60 + when.second
+    payload = (bytes([0x01, source]) + days.to_bytes(2, "little")
+               + (secs * 10000).to_bytes(4, "little"))
+    return f"{can_id:08x}#{payload.hex()}"
+
+
+def _rmc(when: datetime) -> str:
+    """An RMC sentence reporting `when` as its own UTC date and time."""
+    body = (f"GPRMC,{when:%H%M%S},A,4807.038,N,01131.000,E,"
+            f"022.4,084.4,{when:%d%m%y},003.1,W")
+    return _nmea(body)
+
+
 def _rec(ts, proto, raw):
     return {"ts": ts.isoformat(), "_ts": ts, "proto": proto, "raw": raw,
             "device_id": "boat-pi", "src": None, "mono": None}
@@ -198,6 +220,75 @@ def test_column_names_are_proto_field():
     assert "mwv_wind_angle_r" in fields
     assert not any(f in fields for f in ("sog", "awa", "aws")), \
         "no arbitration: raw field ids are the columns, not resolved names"
+
+
+# ── the GPS clock, as an ordinary column ─────────────────────────────────
+
+def test_the_gps_clock_reaches_a_column_from_both_protocols():
+    """`ts` is CLOCK_REALTIME and only as good as the capture box's clock.
+    The archive's independent check on it is the GPS clock riding inside the
+    data, so it has to survive decoding as an ordinary value — the whole
+    point being that a reader compares the two in SQL.
+
+    It nearly did not. Both protocols carry it, but the n2k side reached a
+    column for neither: `date` and `time` come back from the library as
+    datetime objects, and wire_n2k keeps a field only when its value is an
+    int or a float, so PGN 126992 — whose entire purpose is a clock —
+    contributed nothing at all.
+    """
+    gps = datetime(2026, 8, 24, 12, 0, 0, tzinfo=timezone.utc)
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n2k", _system_time(3, 2, gps)))
+    b.add(_rec(T0, "n0183", _rmc(gps)))
+    row = b.rows()[0]
+
+    n2k_col = "n2k_gps_time_gps"          # `source` is a discriminator
+    assert n2k_col in row, f"no n2k GPS clock in {sorted(row)}"
+    assert "rmc_gps_time" in row, f"no 0183 GPS clock in {sorted(row)}"
+    assert row[n2k_col] == row["rmc_gps_time"] == gps.timestamp(), \
+        "both protocols report the same instant, so both columns must agree"
+
+
+def test_a_local_crystal_clock_is_not_a_gps_clock():
+    """126992's source may be the capture box's own clock. Comparing `ts`
+    against that is circular — it would always agree, and say nothing — so it
+    must not land in the column a reader trusts as a GPS reference."""
+    gps = datetime(2026, 8, 24, 12, 0, 0, tzinfo=timezone.utc)
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n2k", _system_time(3, 2, gps, source=2)))   # local crystal
+    row = b.rows()[0] if b.rows() else {}
+    assert "n2k_gps_time_gps" not in row, \
+        f"a non-GPS source reached the GPS column: {sorted(row)}"
+
+
+def test_the_capture_clock_is_recorded_against_the_gps_clock_never_judged():
+    """Nothing here drops or rejects a row over a clock disagreement. The
+    logger records what it was given, this records the GPS clock beside it,
+    and how far apart is too far is a question answered in SQL — where it can
+    be changed — not one frozen into the table."""
+    gps = datetime(2026, 8, 24, 12, 0, 0, tzinfo=timezone.utc)
+    wrong = gps + timedelta(days=400)        # a badly wrong capture clock
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(wrong, "n2k", _system_time(3, 2, gps)))
+    rows = b.rows()
+    assert len(rows) == 1, "a disagreeing clock must not drop the row"
+    assert rows[0]["ts"] == bucket.truncate(wrong, timedelta(seconds=1)), \
+        "the row is still bucketed by its own capture ts, unrepaired"
+    assert rows[0]["n2k_gps_time_gps"] == gps.timestamp(), \
+        "and carries the GPS clock beside it, so the two can be compared"
+
+
+def test_two_gps_units_are_arbitrated_like_any_other_field():
+    """The GPS clock is an ordinary reading, so it carries its frame's own
+    priority and source address and settles by the normal rule — something
+    the 0183 side cannot do, since RMC has neither."""
+    early = datetime(2026, 8, 24, 12, 0, 0, tzinfo=timezone.utc)
+    late = datetime(2026, 8, 24, 12, 0, 5, tzinfo=timezone.utc)
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n2k", _system_time(5, 1, late)))     # worse priority
+    b.add(_rec(T0 + timedelta(milliseconds=10), "n2k", _system_time(2, 9, early)))
+    assert b.rows()[0]["n2k_gps_time_gps"] == early.timestamp(), \
+        "the better-priority device wins the bucket, later sample or not"
 
 
 # ── the table, driven through a fake connection ──────────────────────────

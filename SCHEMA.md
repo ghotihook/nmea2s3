@@ -202,11 +202,16 @@ and records enough to prove it. Capture does not wait, and does not judge.
 A hardware RTC is what closes the window. What makes it survivable without
 one is that nothing is discarded. `mono` on every frame and `clock_epoch` in
 the start audit entry identify which clock basis a run was stamped against,
-and where the archive carries NMEA 0183 RMC, the sentences hold an
-independent UTC reference of their own — `nmea2s3-update-pg` measures the
-capture clock against it and stores the difference as an ordinary field,
-`rmc_clock_offset`, surfaced by `sql/metrics.sql` as `clock_offset`. A step
-there is the system clock moving.
+and the traffic itself carries an independent UTC reference: N2K PGNs 129029
+GNSS Position Data and 126992 System Time, and 0183 RMC, all report a GPS
+clock. `nmea2s3-update-pg` stores each as an ordinary reading in POSIX
+seconds, and `sql/metrics.sql` resolves them into one `gps_time` beside `ts`.
+
+Stored raw rather than as the difference, for the same reason `mono` is: a
+difference is a verdict, and `extract(epoch FROM ts) - gps_time` recovers it
+in SQL whenever anyone wants it, where the threshold that makes it mean
+something can still be argued about. (`rmc_clock_offset` predates that
+reasoning and is kept for the history behind it.)
 
 Nothing in this project drops, rejects or errors on a row because of any of
 that. The readings are recorded and the judgement is left to whoever is

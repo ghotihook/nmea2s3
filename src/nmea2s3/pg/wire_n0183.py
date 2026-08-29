@@ -92,12 +92,24 @@ def _field_name(sentence_type: str, suffix: str) -> str:
     return f"{sentence_type}_{suffix}".lower()
 
 
-def _clock_offset(msg, ts) -> float | None:
-    """seconds by which the CAPTURE clock leads the GPS clock, or None.
+def _gps_datetime(msg):
+    """RMC's own UTC date and time as one tz-aware datetime, or None.
 
-    RMC carries UTC date and time, so it is an independent clock riding
-    inside the data — the only reference that works on an SBC with no RTC,
-    and it is dense: RMC is ~16% of sentences and arrives at 10 Hz here.
+    RMC carries both, so it is an independent clock riding inside the data —
+    the only reference that works on an SBC with no RTC, and it is dense:
+    RMC is ~16% of sentences and arrives at 10 Hz here.
+    """
+    date, time = getattr(msg, "datestamp", None), getattr(msg, "timestamp", None)
+    if date is None or time is None:
+        return None
+    try:
+        return datetime.datetime.combine(date, time, datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clock_offset(gps, ts) -> float | None:
+    """Seconds by which the CAPTURE clock leads the GPS clock, or None.
 
     The normal value is small and POSITIVE: the sentence is timestamped when
     it is received, which is one transmission time after the fix it reports.
@@ -106,15 +118,13 @@ def _clock_offset(msg, ts) -> float | None:
 
     Returns None rather than 0 when there is nothing to compare against, so
     "no reference" stays distinguishable from "agrees exactly".
+
+    Kept alongside the raw `rmc_gps_time` below rather than replaced by it.
+    It is derived — `ts - to_timestamp(gps_time)` in SQL is the same number —
+    and derived values are what this project stores last, but this column has
+    history behind it and costs one subtraction.
     """
-    if ts is None:
-        return None
-    date, time = getattr(msg, "datestamp", None), getattr(msg, "timestamp", None)
-    if date is None or time is None:
-        return None
-    try:
-        gps = datetime.datetime.combine(date, time, datetime.timezone.utc)
-    except (TypeError, ValueError):
+    if gps is None or ts is None:
         return None
     return (ts - gps).total_seconds()
 
@@ -123,9 +133,10 @@ def decode_sentence(sentence_type: str, raw: str, ts=None) -> list[tuple[str, fl
     """One sentence -> [(field, value)]. Empty is normal and not an error.
 
     `ts` is the capture timestamp, passed in only so RMC can emit
-    `rmc_clock_offset` — the wall clock measured against the GPS clock. It is
-    an ordinary field from there on, so the existing bucketing, arbitration
-    and column mapping carry it with no special case anywhere downstream.
+    `rmc_clock_offset` — the wall clock measured against the GPS clock.
+    `rmc_gps_time` needs no such thing: it is the GPS clock itself. Both are
+    ordinary fields from there on, so the existing bucketing, arbitration and
+    column mapping carry them with no special case anywhere downstream.
     """
     # XDR must not go through pynmea2 — it rejects some of these outright, which
     # silently drops every RAW_* transducer.
@@ -169,7 +180,15 @@ def decode_sentence(sentence_type: str, raw: str, ts=None) -> list[tuple[str, fl
         out.append((name, v * SCALE[name] if name in SCALE else v))
 
     if sentence_type == "RMC":
-        offset = _clock_offset(msg, ts)
+        gps = _gps_datetime(msg)
+        if gps is not None:
+            # The GPS clock itself, POSIX seconds, as an ordinary reading —
+            # the same shape wire_n2k emits from 129029/126992, so the two
+            # protocols COALESCE into one `gps_time` in sql/metrics.sql.
+            # Stored raw and compared in SQL: which disagreement is
+            # tolerable is a question about your boat, not about capture.
+            out.append(("rmc_gps_time", round(gps.timestamp(), 6)))
+        offset = _clock_offset(gps, ts)
         if offset is not None:
             out.append(("rmc_clock_offset", offset))
     return out

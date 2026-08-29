@@ -85,9 +85,22 @@ SELECT
     COALESCE(n2k_actualtemperature_0_sea_temperature, mda_water_temp)     AS temp_sea,
     COALESCE(n2k_voltage_0, xdr_battv)                                    AS batt_v,
 
+    -- the GPS clock itself, POSIX seconds. An independent time reference
+    -- riding inside the data, which is the only one a box with no RTC has —
+    -- `ts` is CLOCK_REALTIME and only as good as that box's clock was.
+    -- 129029 first: unambiguously GNSS. 126992 System Time carries the same
+    -- fields but its source may be a local crystal clock, which is the
+    -- capture clock read back at you; only its GPS-sourced column is here.
+    -- `to_timestamp(gps_time)` turns it into a timestamptz — see the foot of
+    -- this file for rejecting rows whose `ts` disagrees with it.
+    COALESCE(n2k_gps_time, n2k_gps_time_gps, rmc_gps_time)                AS gps_time,
+
     -- the wall clock measured against the GPS clock. Positive and small is
     -- normal: the sentence is stamped on receipt, one transmission time
     -- after the fix it reports. A step here is the system clock moving.
+    -- Derived, and kept for the history behind it; the general form, which
+    -- works for n2k too, is `ts - to_timestamp(gps_time)` over the column
+    -- above.
     rmc_clock_offset                                                      AS clock_offset,
 
     -- what the instrument itself computed, kept separate from anything
@@ -186,3 +199,42 @@ GRANT SELECT ON metrics_1s TO ro_user;
 --     sqrt(avg(sin(radians(cog)))^2 + avg(cos(radians(cog)))^2) AS cog_r
 --
 --   Treat a mean bearing with R below ~0.7 as not meaning much.
+
+
+-- ── checking `ts` against the GPS clock ──────────────────────────────────
+--
+-- `ts` is the kernel's capture timestamp, CLOCK_REALTIME, so it is only as
+-- correct as the logger's system clock was at the moment the frame arrived.
+-- Nothing upstream repairs or rejects it: the logger records what it was
+-- given, and `nmea2s3-update-pg` stores the GPS clock beside it without
+-- comparing them. That comparison is a policy — how far apart is too far
+-- depends on what you are asking — so it lives here, where it is one
+-- predicate and costs nothing to change your mind about.
+--
+-- The offset in seconds, for every row that carries a GPS reference:
+--
+--   SELECT ts,
+--          to_timestamp(gps_time) AS gps,
+--          extract(epoch FROM ts) - gps_time AS offset_s
+--     FROM metrics_1s
+--    WHERE gps_time IS NOT NULL
+--    ORDER BY ts;
+--
+-- Rows whose clock you can trust, within two seconds:
+--
+--   SELECT * FROM metrics_1s
+--    WHERE gps_time IS NOT NULL
+--      AND abs(extract(epoch FROM ts) - gps_time) < 2;
+--
+-- Two things to know before you set that bound:
+--
+--   A small POSITIVE offset is normal, not drift. The frame is stamped on
+--   receipt, one transmission time after the fix it reports — 167 ms for an
+--   80-character 0183 sentence at 4800 baud, negligible on N2K at 250
+--   kbit/s. The measured median on this archive is +0.35 s, all of it 0183.
+--
+--   `gps_time IS NULL` is not a bad row. It means no GPS reported into that
+--   bucket — different from disagreeing, and far more common at coarse
+--   buckets or on a boat whose GPS is quiet. Excluding NULLs and excluding
+--   disagreements are separate decisions; the predicates above do only the
+--   second, and say so by testing IS NOT NULL first.
