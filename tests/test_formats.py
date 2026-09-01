@@ -13,7 +13,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -352,6 +352,43 @@ def test_candump_writes_one_bare_line_per_row():
     assert len(lines) == 3, "a header would make this 4"
     assert all(CANDUMP_LINE.fullmatch(l) for l in lines)
     assert out.getvalue().endswith("\n")
+
+
+def test_a_closed_reader_stops_the_export_rather_than_skipping_the_archive():
+    """A broken pipe means the READER went away (`| head`, an `nc` that
+    exited) — not that the object is corrupt. The generic skip-and-continue
+    handler used to catch it, so one closed pipe downloaded every remaining
+    object in the range to write it into a closed fd and reported the whole
+    archive as `unreadable/malformed content`."""
+    import contextlib
+
+    keys_read = []
+
+    class ClosedPipe:
+        def write(self, _):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def fake_iter_keys(s3, bucket, since, until, proto):
+        for i in range(5):
+            keys_read.append(i)
+            yield f"raw/2026/08/29/04{i}419-n2k-7503ac5c9097321f.ndjson.gz"
+
+    def fake_reader(s3, bucket, key):
+        yield _candump_row()
+
+    saved = (export.iter_keys, export.READERS["raw"])
+    export.iter_keys, export.READERS["raw"] = fake_iter_keys, fake_reader
+    try:
+        with contextlib.redirect_stdout(ClosedPipe()):
+            try:
+                export.export_source(object(), "test-bucket", "raw", "n2k",
+                                     date.min, date.max, None, "candump", False)
+                assert False, "the broken pipe should have propagated"
+            except BrokenPipeError:
+                pass
+    finally:
+        export.iter_keys, export.READERS["raw"] = saved
+    assert keys_read == [0], f"kept downloading after the reader left: {keys_read}"
 
 
 def _run_exporter(argv: list[str]):

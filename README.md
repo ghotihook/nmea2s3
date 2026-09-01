@@ -195,8 +195,9 @@ Because every protocol shares one record, a mixed export is a well-formed
 single file — including CSV, which the old per-protocol column sets made
 impossible.
 
-Exit 2 means the export finished but is incomplete — at least one object
-could not be read after retries, named on stderr.
+Exit 2 means the export is incomplete — either at least one object could
+not be read after retries (each named on stderr), or the reader of the
+output closed the pipe before the export finished.
 
 ## Query it in Postgres
 

@@ -256,6 +256,15 @@ def export_source(s3, bucket: str, source: str, proto: str | None,
                 rows_written += row_count
                 if verbose:
                     print(f"  {key} ({row_count} rows)", file=sys.stderr)
+            except BrokenPipeError:
+                # Nothing to do with this object: the READER of our output
+                # went away (`| head`, an `nc` that exited). Treating it as
+                # unreadable content and continuing downloads the entire
+                # rest of the archive just to write it into a closed pipe,
+                # one SKIPPED line per object, and reports a reader's
+                # normal exit as a corrupt archive. Stop instead; main()
+                # turns this into one line and exit 2.
+                raise
             except (BotoCoreError, ClientError) as e:
                 objects_failed += 1
                 print(f"  SKIPPED {key} — retries exhausted: {e}", file=sys.stderr)
@@ -354,9 +363,22 @@ def main():
 
     s3 = make_s3_client(config["s3_endpoint_url"], config["s3_region"],
                         config["s3_access_key_id"], config["s3_secret_access_key"])
-    _read, objects_failed, _rows = export_source(
-        s3, config["s3_bucket"], args.source, args.proto, since, until,
-        output_path, args.format, args.verbose)
+    try:
+        _read, objects_failed, _rows = export_source(
+            s3, config["s3_bucket"], args.source, args.proto, since, until,
+            output_path, args.format, args.verbose)
+    except BrokenPipeError:
+        # Python ignores SIGPIPE, so a closed reader surfaces as EPIPE on
+        # the next write rather than killing us — and would surface AGAIN
+        # when the interpreter flushes stdout on the way out, printing an
+        # "Exception ignored" traceback after we have already said our
+        # piece. Pointing the fd at /dev/null makes that final flush
+        # silent. Exit 2 for the same reason a skipped object does: the
+        # export stopped early, and what the reader got is incomplete.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        print("Stopped: the reader of this export closed the pipe. "
+              "Output is incomplete.", file=sys.stderr)
+        sys.exit(2)
 
     # Exit 2 = the export completed but is INCOMPLETE: at least one object
     # could not be read after retries. This was previously recorded only as
