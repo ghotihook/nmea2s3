@@ -236,10 +236,31 @@ def run(args, config) -> int:
         if args.dry_run:
             print("This was a DRY RUN — nothing was written to Postgres.",
                   file=sys.stderr)
-        else:
-            # Postgres is derived and disposable, but the ledger it just wrote
-            # decides what a later run will skip, so a run that changed it is
-            # worth recording where every other tool's runs are recorded.
+        elif new_columns or args.rebuild:
+            # Only runs that did something no later reader could reconstruct.
+            #
+            # WHICH objects were ingested, and how many rows each produced, is
+            # already in the ledger table — per object, written in the loop
+            # above. An entry per incremental run duplicates that into a
+            # bucket whose credentials cannot delete: the logger lands a new
+            # object every FLUSH_INTERVAL (300 s, ~288 a day), so any cron
+            # under ~5 minutes finds new work almost every time and wrote
+            # ~288 permanent entries a day. Thousands a month, burying the
+            # handful that matter.
+            #
+            # These two do not survive the ledger being dropped, which is the
+            # whole reason to write here instead of relying on Postgres — it
+            # is derived and disposable, and rebuilding it loses the fact that
+            # a column ever appeared or that a rebuild was ever ordered:
+            #
+            #   new_columns   a schema change. The table means something
+            #                 different after this run than before it
+            #   --rebuild     the ledger was deliberately ignored and rows
+            #                 rewritten, so two readings of the same range
+            #                 disagreeing has a recorded cause
+            #
+            # A routine catch-up run is not silent, just not permanent: the
+            # summary above still goes to stderr, and to the journal with it.
             log_action_safely(
                 s3, config["s3_bucket"], APPLICATION, 0, f"updated pg: {summary}",
                 {"objects": total_objects, "rows": total_rows, "table": args.table,

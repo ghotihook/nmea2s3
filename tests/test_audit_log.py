@@ -10,8 +10,9 @@ audit_log.py until 2026-08-28, called by nothing.
 
 Two tools write here. The logger is the shape that needs the pairing: it
 runs until something stops it, so a start with no end is how a killed run
-shows up at all. `nmea2s3-update-pg` writes one entry per run that changed
-something, and none at all for `--dry-run`.
+shows up at all. `nmea2s3-update-pg` writes only when a run did something the
+ledger cannot recover — a schema change or a `--rebuild` — and none at all for
+`--dry-run`.
 """
 
 import os
@@ -62,6 +63,39 @@ def test_a_dry_run_writes_no_audit_entry():
     assert guards, "nothing distinguishes a dry run from a real one"
     assert any(writes_audit(g.orelse) and not writes_audit(g.body) for g in guards), \
         "the audit write must sit on the branch a dry run does not take"
+
+
+def test_a_routine_catch_up_run_writes_no_audit_entry():
+    """One entry per incremental run made `_log/` unreadable. The logger lands
+    ~288 objects a day, so a cron under ~5 minutes found new work almost every
+    time and wrote a permanent entry saying so — thousands a month, in a bucket
+    that cannot delete, around the handful describing an actual change.
+
+    Which objects were ingested is already in the ledger table. What the ledger
+    does NOT survive is being dropped, and Postgres here is explicitly derived
+    and disposable, so the two facts that outlive it are the two worth writing:
+    a column appearing, and a rebuild being ordered.
+
+    Parsed, not driven, for the same reason as the dry-run test above: reaching
+    the call site needs a live Postgres, and what has to hold is the shape of
+    the guard.
+    """
+    import ast
+    src = (H.REPO / "src" / "nmea2s3" / "pg" / "update.py").read_text()
+
+    calls = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.If)
+             and any(isinstance(c, ast.Call) and getattr(c.func, "id", None) == "log_action_safely"
+                     for c in ast.walk(n))
+             and not any(isinstance(c, ast.If) and c is not n
+                         and any(isinstance(x, ast.Call)
+                                 and getattr(x.func, "id", None) == "log_action_safely"
+                                 for x in ast.walk(c))
+                         for c in ast.walk(n))]
+    assert len(calls) == 1, "expected exactly one guard directly around the audit write"
+    test = ast.dump(calls[0].test)
+    assert "new_columns" in test, "a new column is a schema change and must be recorded"
+    assert "rebuild" in test, "a rebuild rewrote rows the ledger no longer explains"
 
 
 # ── the logger: brackets its own writes ──────────────────────────────────

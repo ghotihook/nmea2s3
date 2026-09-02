@@ -235,6 +235,14 @@ The logger writes two per run: a start entry, and a stop entry. A start with
 no stop after it is a run that died partway — the case no exception handler
 can report, because a SIGKILL or a pulled plug raises nothing to catch.
 
+`nmea2s3-update-pg` writes at most one per run, and only when that run added a
+column or was a `--rebuild`. A routine catch-up writes nothing: which objects
+it ingested is already in its ledger table, and at ~288 new objects a day a
+frequent cron turned that duplication into thousands of permanent entries a
+month. The two exceptions are the two facts the ledger loses if the derived
+database is ever dropped — that a column appeared, and that a rebuild was
+ordered.
+
 | field | type | notes |
 |---------------|-------------------|-------|
 | `timestamp` | string (ISO 8601) | when logged — the one place upload time IS the meaningful time |
