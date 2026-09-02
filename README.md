@@ -21,24 +21,26 @@ field rather than on which directory a row came from.
 ## Install
 
 ```bash
-pipx install git+https://github.com/ghotihook/nmea2s3.git
+sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git
 ```
 
-Not on PyPI — install from the repo. Pin a tag for anything you actually
-deploy, so `nmea2s3-logger --version` in the journal tells you truthfully what is
-running:
+Not on PyPI — install from the repo. `--global` builds the venv in
+`/opt/pipx/venvs/nmea2s3` and symlinks the commands into `/usr/local/bin`,
+which is where the systemd unit expects them; without it they land in
+`~/.local/bin` and `ExecStart=` has to be pointed there instead.
+
+**`--force` on every install, upgrades included.** `pipx upgrade` compares
+version numbers, so new commits that did not bump `version` in
+`pyproject.toml` look like nothing to do — leaving you on old code believing
+you upgraded, at the one thing that cannot be re-run. An upgrade replaces the
+venv underneath the running process, so follow it with
+`sudo systemctl restart nmea2s3`.
+
+Pin a tag for anything you actually deploy, so `nmea2s3-logger --version` in
+the journal tells you truthfully what is running:
 
 ```bash
-pipx install git+https://github.com/ghotihook/nmea2s3.git@v0.1.0
-```
-
-**Upgrading needs `--force`.** `pipx upgrade` compares version numbers, so new
-commits that did not bump `version` in `pyproject.toml` look like nothing to
-do — leaving you on old code believing you upgraded, at the one thing that
-cannot be re-run:
-
-```bash
-pipx install --force git+https://github.com/ghotihook/nmea2s3.git
+sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git@v0.1.0
 ```
 
 Three commands land on your `PATH`:
@@ -90,9 +92,9 @@ nmea2s3-logger --can can0
 ```
 
 Under systemd nothing needs sourcing — the unit points `EnvironmentFile=` at
-a copy installed mode 600 under `/etc` (below) and reads it as root, before
-dropping to `User=`, so the logger's own account never needs to be able to
-read the secret at all.
+a copy installed mode 600 under `/etc` (below), which systemd reads before
+starting the process. The service runs as root, so keep that copy root-owned
+and 600: nothing else on the box has any reason to read the key.
 
 ## Run it
 
@@ -102,16 +104,16 @@ nmea2s3-logger --log-level DEBUG     # or $NMEA2S3_LOG_LEVEL
 nmea2s3-logger --device-id test      # what goes in each row's device_id; default hostname
 ```
 
-For a real deployment, use the `nmea2s3.service` you fetched above — a
-template with three placeholders to replace, and the reasoning for every
-directive written down inline. It is worth reading before you copy it: the
+For a real deployment, use the `nmea2s3.service` you fetched above. Nothing
+in it needs editing for a `--global` install — it runs as root, spools to
+`/var/lib/nmea2s3`, and every path is already absolute. It is worth reading
+before you copy it: the
 ordering, the restart policy and the memory limit are each there because of
 a specific way this has failed before.
 
 ```bash
 sudo install -Dm600 env /etc/nmea2s3/env
 sudo install -m644 nmea2s3.service /etc/systemd/system/
-sudo sed -i "s/youruser/$USER/g" /etc/systemd/system/nmea2s3.service
 sudo systemctl daemon-reload && sudo systemctl enable --now nmea2s3
 journalctl -u nmea2s3 -f
 ```
@@ -145,9 +147,14 @@ Meanwhile the logger prints a line a minute:
   beside `ts` as `gps_time` — from N2K and 0183 alike — so a row stamped by
   a wrong clock is one predicate away. Nothing anywhere drops a row over it.
 
-Set `NMEA2S3_DISK_DIR` to a persistent mount with room to spare — never
-tmpfs. The spool holds 2 GB, roughly 6 days at a busy bus's frame rate,
-before it starts dropping its oldest batch.
+The spool needs a persistent mount with room to spare — never tmpfs. It holds
+2 GB, roughly 6 days at a busy bus's frame rate, before it starts dropping its
+oldest batch. Under systemd it is `/var/lib/nmea2s3`, pinned by the unit's
+`StateDirectory=` and the one path the sandbox can write; setting
+`NMEA2S3_DISK_DIR` in the env file will not move it. To put it elsewhere —
+a USB stick, if SD/eMMC wear is a concern — change `Environment=` in the unit
+and add a matching `ReadWritePaths=`. Run outside systemd it defaults to
+`~/n2k_fallback` and the variable applies as normal.
 
 ## Read it back
 
