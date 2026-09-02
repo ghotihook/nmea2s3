@@ -226,11 +226,15 @@ Recorded so the constraint between the two constants is not forgotten.
 
 ### 18. `systemd/nmea2s3.service` hardcodes `can0` twice
 
-`:78` in `ExecStartPre` and `:82` in `ExecStart --can can0`. Changing the
-interface silently requires editing both, and the header's "three things need
-your values" does not mention it. `README.md:118` also calls it "three
-placeholders" when the documented `sed` replaces only `youruser` — which is
-in fact sufficient.
+`:37` in `ExecStartPre` and `:39` in `ExecStart --can can0`. Changing the
+interface silently requires editing both, and nothing in the header says so.
+The spool avoided the same trap by moving to `--disk-dir`, which the unit
+passes once; the interface still cannot, because `ExecStartPre` runs before
+the process exists and has to name it independently.
+
+(The second half of this item — `README.md` calling the unit a template with
+"three placeholders" — went away with the root/global rewrite: there are no
+placeholders left to miscount.)
 
 ---
 
