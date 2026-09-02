@@ -86,7 +86,7 @@ Spool, then upload:
   picked up by whatever next reprocesses the window covering it.
 
   - The spool directory must be a persistent mount (not tmpfs).
-    Default: ~/n2k_fallback, overridable with NMEA2S3_DISK_DIR.
+    Default: ~/n2k_fallback; --disk-dir wins, then NMEA2S3_DISK_DIR.
   - Stale .tmp files left by a prior crash are discarded on startup.
   - DISK_DIR is capped at MAX_DISK_BYTES. If an outage runs long enough to
     fill it, the OLDEST spool file is deleted to make room for the newest
@@ -124,7 +124,7 @@ Required:
 
 Optional:
   NMEA2S3_S3_REGION   — default: us-east-1 (DO Spaces ignores it, boto3 requires it)
-  NMEA2S3_DISK_DIR    — override spool directory (default: ~/n2k_fallback)
+  NMEA2S3_DISK_DIR    — spool directory (default: ~/n2k_fallback; --disk-dir wins)
   NMEA2S3_LOG_LEVEL   — logging level (default: INFO; overridden by --log-level)
 
 Install: pipx install nmea2s3 — boto3 and the stdlib, nothing else. Deploy
@@ -409,9 +409,15 @@ TIMESTAMP_FLOOR = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
 
 class N2KLogger:
-    def __init__(self, can_iface: str = "can0"):
+    # disk_dir is passed rather than read from the environment so a caller can
+    # win outright. Under systemd that caller is ExecStart=: EnvironmentFile=
+    # always overrides Environment=, so a unit cannot pin the spool with an
+    # environment variable — the env file gets the last word and would send
+    # the spool somewhere the sandbox refuses to let it write. The command
+    # line is not in that contest.
+    def __init__(self, can_iface: str = "can0", disk_dir: str | Path | None = None):
         self.can_iface  = can_iface   # SocketCAN interface name
-        self.disk_dir   = DISK_DIR
+        self.disk_dir   = Path(disk_dir) if disk_dir else DISK_DIR
         self.buffer: deque[Frame] = deque()
         self.buffer_bytes = 0
         self.running    = False
@@ -886,7 +892,7 @@ class N2KLogger:
 # ── Entry point ──────────────────────────────────────────────────────────
 
 async def _run(args):
-    n2k_logger = N2KLogger(can_iface=args.can)
+    n2k_logger = N2KLogger(can_iface=args.can, disk_dir=args.disk_dir)
     shutdown_event = asyncio.Event()
     loop           = asyncio.get_running_loop()
 
@@ -948,6 +954,12 @@ def main():
         choices=_LEVELS,
         default=None,
         help=f"logging level ({', '.join(_LEVELS)}); default: $NMEA2S3_LOG_LEVEL or INFO",
+    )
+    parser.add_argument(
+        "--disk-dir",
+        metavar="DIR",
+        default=None,
+        help="spool directory; wins over $NMEA2S3_DISK_DIR (default: ~/n2k_fallback)",
     )
     parser.add_argument(
         "--device-id",

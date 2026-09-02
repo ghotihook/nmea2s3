@@ -286,9 +286,10 @@ def test_a_dead_loop_exits_instead_of_hanging():
 
     class Args:
         can = "can0"
+        disk_dir = None
 
     saved = L.N2KLogger
-    L.N2KLogger = lambda can_iface: lg
+    L.N2KLogger = lambda can_iface, disk_dir=None: lg
     try:
         with H.AuditLog() as log:
             asyncio.run(asyncio.wait_for(L._run(Args()), timeout=3))
@@ -326,17 +327,33 @@ def test_the_unit_starts_a_command_the_package_installs():
 
 
 def test_the_unit_can_write_its_spool():
-    """ProtectHome=read-only makes every path under /home unwritable unless
-    ReadWritePaths names it, and a logger that cannot write its spool has
-    nowhere to put a frame — the one failure this whole design exists to
-    prevent, introduced by a hardening directive."""
+    """ProtectSystem=strict makes the whole filesystem read-only except what
+    StateDirectory= and ReadWritePaths= carve back out, and a logger that
+    cannot write its spool has nowhere to put a frame — the one failure this
+    whole design exists to prevent, introduced by a hardening directive."""
     unit = _unit_directives()
-    if "ProtectHome=read-only" not in unit:
-        return
-    spool = [l.split("=", 1)[1] for l in unit.splitlines()
-             if l.startswith("ReadWritePaths=")]
-    assert spool, "ProtectHome=read-only with no ReadWritePaths for the spool"
-    assert any(p.startswith("/home/") for p in spool), spool
+    spool = re.search(r"^ExecStart=.*--disk-dir (\S+)", unit, re.M)
+    assert spool, "the unit must pass --disk-dir; see the test below for why"
+    spool = spool.group(1)
+    writable = [l.split("=", 1)[1] for l in unit.splitlines()
+                if l.startswith("ReadWritePaths=")]
+    writable += ["/var/lib/" + l.split("=", 1)[1] for l in unit.splitlines()
+                 if l.startswith("StateDirectory=")]
+    assert any(spool == w or spool.startswith(w + "/") for w in writable), \
+        f"nothing makes {spool} writable under this sandbox: {writable or 'no carve-out at all'}"
+
+
+def test_the_spool_path_is_not_settable_from_the_env_file():
+    """EnvironmentFile= overrides Environment= whatever their order in the
+    unit — systemd.exec(5): "Settings from these files override settings made
+    with Environment=". So a spool pinned with an environment variable is one
+    that /etc/nmea2s3/env gets the last word on, and a value there points the
+    app somewhere the sandbox above still refuses to let it write: frames lost
+    at flush with a warning, not a crash. The command line is not in that
+    contest, which is why the spool is a flag and not a variable."""
+    unit = _unit_directives()
+    assert "NMEA2S3_DISK_DIR" not in unit, \
+        "pass the spool as --disk-dir: Environment= loses to EnvironmentFile="
 
 
 def _unit_directives() -> str:
@@ -384,6 +401,7 @@ def test_every_directive_sits_in_a_section_systemd_reads_it_from():
                     "TimeoutStopSec", "StandardOutput", "StandardError", "KillMode",
                     "SyslogIdentifier", "NoNewPrivileges", "ProtectSystem",
                     "ProtectHome", "ReadWritePaths", "PrivateTmp", "MemoryMax",
+                    "Environment", "StateDirectory",
                     "OOMScoreAdjust", "CPUWeight", "CPUQuota"},
         "Install": {"WantedBy", "RequiredBy", "Alias", "Also"},
     }
@@ -422,8 +440,8 @@ def test_the_unit_brings_the_interface_up_before_capturing():
     unit = _unit_directives()
     step = _unit_value(unit, "ExecStartPre")
     assert step, "nothing brings the interface up"
-    assert step.startswith("+"), \
-        "`ip link` needs CAP_NET_ADMIN; `+` runs this one step privileged"
+    assert step.startswith("+") or not _unit_value(unit, "User"), \
+        "`ip link` needs CAP_NET_ADMIN: run as root, or prefix the step with `+`"
     assert "ip link set" in step
     iface = re.search(r"^ExecStart=\S+ --can (\S+)", unit, re.M).group(1)
     assert f"ip link show {iface}" in step, \

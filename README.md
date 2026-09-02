@@ -149,12 +149,16 @@ Meanwhile the logger prints a line a minute:
 
 The spool needs a persistent mount with room to spare — never tmpfs. It holds
 2 GB, roughly 6 days at a busy bus's frame rate, before it starts dropping its
-oldest batch. Under systemd it is `/var/lib/nmea2s3`, pinned by the unit's
-`StateDirectory=` and the one path the sandbox can write; setting
-`NMEA2S3_DISK_DIR` in the env file will not move it. To put it elsewhere —
-a USB stick, if SD/eMMC wear is a concern — change `Environment=` in the unit
-and add a matching `ReadWritePaths=`. Run outside systemd it defaults to
-`~/n2k_fallback` and the variable applies as normal.
+oldest batch. Under systemd it is `/var/lib/nmea2s3`, created by the unit's
+`StateDirectory=` and passed on the command line as `--disk-dir`. The flag is
+deliberate: `EnvironmentFile=` always overrides `Environment=`, so a unit
+cannot pin the spool with an environment variable — the env file would get the
+last word and could point it somewhere the sandbox refuses to let it write.
+The command line is not in that contest, so `NMEA2S3_DISK_DIR` in the env file
+is simply ignored rather than obeyed-and-broken. To put the spool elsewhere —
+a USB stick, if SD/eMMC wear is a concern — change `--disk-dir` in the unit
+and add a matching `ReadWritePaths=`. Run by hand, with no flag, it falls back
+to `$NMEA2S3_DISK_DIR` and then `~/n2k_fallback`.
 
 ## Read it back
 

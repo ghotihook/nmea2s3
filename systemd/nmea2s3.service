@@ -24,18 +24,19 @@ StartLimitIntervalSec=0
 [Service]
 EnvironmentFile=/etc/nmea2s3/env
 
-# Spool lives in /var/lib/nmea2s3 — StateDirectory creates it and makes it
-# the one writable path. Set AFTER EnvironmentFile= so it wins over the env
-# file: a spool the sandbox cannot write is a logger that captures nothing.
-# To move it, change it here and add a matching ReadWritePaths=.
-Environment=NMEA2S3_DISK_DIR=/var/lib/nmea2s3
+# Creates /var/lib/nmea2s3, the only path this sandbox can write. The spool
+# path is passed on the command line below, not as an environment variable:
+# EnvironmentFile= always overrides Environment=, so the env file would get
+# the last word and could send the spool somewhere writing fails. To move the
+# spool: change --disk-dir AND add a ReadWritePaths= for the new path — both,
+# or it cannot write there.
 StateDirectory=nmea2s3
 
 # Binding to a DOWN can0 succeeds and captures nothing, so bring it up first.
 # Idempotent — can0 is shared with n2k2ip.
 ExecStartPre=/bin/sh -c 'ip link show can0 | grep -qw UP || ip link set can0 up type can bitrate 250000 restart-ms 100 2>/dev/null; ip link show can0 | grep -qw UP'
 
-ExecStart=/usr/local/bin/nmea2s3-logger --can can0
+ExecStart=/usr/local/bin/nmea2s3-logger --can can0 --disk-dir /var/lib/nmea2s3
 SyslogIdentifier=nmea2s3
 Restart=always
 RestartSec=5
