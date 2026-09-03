@@ -23,13 +23,17 @@ BEARING_FIELDS: frozenset[str] = frozenset({
     "n2k_windangle_magnetic_ground_referenced_to_magnetic_north",
 })
 
-# Relative angles, folded to (-180, 180] so the sign says which side.
+# Relative angles: the sign is meant to say which side, so these are folded
+# to (-180, 180] — the 0183 ones by the talker, the n2k ones by wire_n2k.
 #
-# UNVERIFIED for the n2k entries: which convention the nmea2000 library
-# returns for PGN 130306 has not been confirmed against real traffic. The
-# wire format is 0..2pi, which would make them bearings instead. Check the
-# first real day before trusting apparent/true wind angle where the two
-# streams overlap.
+# The BOUND below is (-180, 360) rather than (-180, 180], deliberately, and
+# the two do not agree on purpose. UNVERIFIED: which convention the nmea2000
+# library returns for PGN 130306 has not been confirmed against real traffic,
+# and the wire format is 0..2pi, which would make them bearings instead. A
+# bound is the wrong place to discover that — it would silently drop every
+# reading rather than report the mismatch. So it stays wide enough to admit
+# either convention until the first real day settles it, and can be tightened
+# to (-180, 180] then.
 SIGNED_FIELDS: frozenset[str] = frozenset({
     "mwv_wind_angle_r", "mwv_wind_angle_t",
     "n2k_windangle_apparent", "n2k_windangle_true_boat_referenced",

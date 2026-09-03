@@ -48,39 +48,6 @@ the rest, or document that this path can duplicate.
 in the repo pins. The last remaining schema assumption after `353fc0e` fixed
 the same class of bug in `table.ensure()`.
 
-### 5. Stale claims in module docs
-
-Each verified against the code:
-
-- `src/nmea2s3/ndjson.py:11-18` says `object_exists()` "lived here until
-  2026-08-28 and was called by nothing." It is still at `:266`, still called
-  by nothing, and its docstring justifies it by "a day-at-a-time importer"
-  that does not exist in this repo. It is also the only caller of
-  `with_retries(quiet_codes=…)`, so removing it makes that parameter dead too.
-- `src/nmea2s3/ndjson.py:27,32` — the function index gives
-  `s3_key(source, day, …)` building `<source>/<yyyy>/…` (actual: `s3_key(proto,
-  …)` → `raw/…/<HHMMSS>-<proto>-<cid>.ndjson.gz`) and `iter_keys(s3, bucket,
-  source, since, until)` (actual: `(s3_client, bucket, since, until,
-  proto=None)`). `record_line`, `valid_proto`, `key_proto` and `iter_log_keys`
-  are absent from the index — including the one function that defines the record.
-- `src/nmea2s3/logger.py:206` — "the unit's `MemoryMax=128M`". The unit is
-  512M, and `:221` in the same comment block reasons correctly from 512M.
-- `src/nmea2s3/logger.py:130` — "Install: `pipx install nmea2s3`". Not on
-  PyPI; `README.md:24` installs from git.
-- `src/nmea2s3/logger.py:919` — "Console-script entry point — `nmea2s3`".
-  The script is `nmea2s3-logger`.
-- `src/nmea2s3/audit_log.py` — the "orphaned bullet" in the function index
-  still describes the `__main__` wrapper the docstring itself says was
-  removed. (The `run_id` half of this item is resolved: `nmea2s3-migrate-n0183`
-  writes start/end entries paired that way, and `SCHEMA.md` now documents it
-  rather than denying it.)
-- `src/nmea2s3/pg/update.py:65` lists `NMEA2S3_PG_PORT` as required;
-  `load_config():117` defaults it to 5432, and `env.example` has it optional.
-- `src/nmea2s3/pg/ranges.py:26` says signed fields are "folded to (-180, 180]";
-  the bound at `:40` is `(-180.0, 360.0)`. If the wide bound is deliberate
-  hedging against the `UNVERIFIED` note below it, the comment above should not
-  state the narrow convention as fact.
-
 ### 6. `--table` cannot be schema-qualified
 
 `table.py:33` `SAFE_NAME` rejects a `.`, so `--table analytics.observations`
@@ -204,6 +171,7 @@ placeholders left to miscount.)
 | `7b0aff5` | The unit ran as an unprivileged user from `~/.local/bin`. Now root from a `pipx --global` install, spooling to `/var/lib/nmea2s3` — the default `Path.home()/n2k_fallback` is `/root/...` as root, which `ProtectHome=read-only` blocks, so it would have started clean and been unable to write a frame |
 | `17ea6da` | The spool was pinned with `Environment=`, which `EnvironmentFile=` overrides whatever the order — so `/etc/nmea2s3/env` had the last word on a path only the unit's sandbox permits. Now `--disk-dir`, which is not in that contest |
 | `2ced7e1` | **`_log/` keys carry the application as a directory.** It was a body field only, so selecting or removing one tool's entries meant GETting every object — and lifecycle rules, which match a prefix and nothing else, could not target them at all |
+| *(this pass)* | **Item 5 above, all eight bullets.** Every stale claim in a module docstring, verified against the code rather than taken from the list: `object_exists()` described as removed when it is called by the importer; a function index with two wrong signatures and five missing entries; two references to a `MemoryMax` the unit has not had; a PyPI install line for something not on PyPI; a console script named `nmea2s3`; an index entry for a `__main__` wrapper that was deleted; `NMEA2S3_PG_PORT` listed as required when it defaults; and a range comment stating a convention its own bound contradicts. Also `--disk-dir`, which reached the CLI without reaching the docstring that lists the options |
 | `0c44842` | The 0183 importer moved into this repo as `nmea2s3-migrate-n0183`. It was converting a naive `received_at` with `.astimezone()`, which assumes the local zone rather than failing — a `timestamp without time zone` column imported from a Sydney-set box filed every row ten hours early, invisibly and permanently. Now refused |
 | `319558b` | **Item 1 above.** Every temperature field id converts to Celsius, not just the deprecated PGN's. `ranges.py` and the `temp_sea` chain follow |
 | `65235f3` | **Item 2 above.** The start audit entry was awaited before the listener existed: out of coverage at power-up, up to 60s in which the one process that cannot re-read its input captured nothing |

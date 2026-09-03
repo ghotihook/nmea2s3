@@ -10,26 +10,31 @@ runs on a boat's SBC, so nothing heavier gets in.
 
 Writes here need no existence check: the key is content-addressed, so the
 same content always resolves to the same key and even a blind re-upload is a
-harmless overwrite, never a duplicate. An object_exists() helper lived here
-until 2026-08-28 and was called by nothing — what it buys is skipping the
-network transfer when nothing changed, and the logger deliberately does not
-want that trade: it is a latency-sensitive live service firing one PUT per
-flush, and a HEAD before every PUT would only slow it down to skip an
-occasional redundant re-upload.
+harmless overwrite, never a duplicate. object_exists() is here anyway, and
+what it buys says exactly who should use it — skipping work when nothing
+changed. The logger does not want that trade: it is a live service firing one
+PUT per flush, and a HEAD before each would only add a round trip to skip an
+occasional redundant re-upload. nmea2s3-migrate-n0183 does want it, because
+what it avoids there is re-reading a day out of a database, not an S3 PUT.
 
 See SCHEMA.md for the full rationale behind the key format and every
 convention below; this module is the one place that implements it, and
 tests/test_formats.py checks the two against each other.
 
 Functions, in the order they would typically be used:
-  required_env(name)                          -- read an env var or exit with a clear message; never hardcode credentials
+  required_env(name)                           -- read an env var or exit with a clear message; never hardcode credentials
+  record_line(ts, mono, device_id, src, proto, raw) -- one archive record; the one definition of the row
+  valid_proto(proto)                           -- whether a proto can appear in a key without breaking the parse
   gzip_and_id_stream(lines)                    -- one pass over ndjson lines -> (content_id, gzipped bytes)
-  s3_key(source, day, time_of_day, cid)        -- build the <source>/<yyyy>/<mm>/<dd>/<time>-<cid>.ndjson.gz key
+  s3_key(proto, day, time_of_day, cid)         -- build the raw/<yyyy>/<mm>/<dd>/<time>-<proto>-<cid>.ndjson.gz key
   put_object_gz(s3_client, bucket, key, body)  -- upload with the one shared ContentType convention
   make_s3_client(endpoint_url, region, access_key_id, secret_access_key) -- construct the boto3 client with the shared zero-retry config
+  object_exists(s3_client, bucket, key)        -- HEAD one key; for callers whose re-read is expensive, not for the logger
   group_by_day(items)                          -- split a list of `.ts`-bearing items into per-UTC-day runs
   key_date(key)                                -- parse the <yyyy>/<mm>/<dd> out of a key, no download needed
-  iter_keys(s3, bucket, source, since, until)  -- paginated listing under <source>/, filtered by key_date
+  key_proto(key)                               -- parse the <proto> out of an object name, no download needed
+  iter_keys(s3_client, bucket, since, until, proto=None) -- paginated listing under raw/, filtered by key_date and optionally proto
+  iter_log_keys(s3_client, bucket, since, until, application=None) -- the same for _log/, which is shaped differently
   iter_rows_ndjson_gz(s3, bucket, key)         -- download + gunzip + parse one ndjson.gz object, row by row
 """
 

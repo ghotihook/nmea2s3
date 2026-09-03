@@ -109,6 +109,8 @@ Spool, then upload:
 
 Options:
   --can IFACE        — SocketCAN interface to read (default: can0)
+  --disk-dir DIR     — spool directory; wins over NMEA2S3_DISK_DIR, which is
+                       why the unit passes it (default: ~/n2k_fallback)
   --log-level LEVEL  — logging level (default: INFO); overrides NMEA2S3_LOG_LEVEL
   --device-id ID     — device_id recorded in each row (default: hostname)
 
@@ -127,8 +129,10 @@ Optional:
   NMEA2S3_DISK_DIR    — spool directory (default: ~/n2k_fallback; --disk-dir wins)
   NMEA2S3_LOG_LEVEL   — logging level (default: INFO; overridden by --log-level)
 
-Install: pipx install nmea2s3 — boto3 and the stdlib, nothing else. Deploy
-with systemd/nmea2s3.service.
+Install: sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git
+Not on PyPI. --global puts the commands in /usr/local/bin, which is where
+systemd/nmea2s3.service expects them. The logger itself imports boto3 and the
+stdlib, nothing else.
 """
 
 import argparse
@@ -209,7 +213,7 @@ UPLOAD_INTERVAL = 30.0   # seconds — spool files -> S3
 STATS_INTERVAL  = 60.0   # seconds between stats log lines
 
 # RAM budget, counted in serialized ndjson bytes. Bounded by the unit's
-# MemoryMax=128M, NOT by what the buffer would ideally hold — an OOM kill
+# MemoryMax, NOT by what the buffer would ideally hold — an OOM kill
 # loses the whole buffer rather than just its oldest end, which is the one
 # outcome this cap exists to prevent. Disk is the overflow.
 #
@@ -271,7 +275,7 @@ class Frame(NamedTuple):
     turned into JSON two to four times (once for the byte accounting at
     append, again per eviction, again at flush) and left two serializations
     that had to agree for the accounting to be correct. It also cost 3.5x
-    the frame's own payload size in RAM against a 128M MemoryMax; this form
+    the frame's own payload size in RAM against the unit's MemoryMax; this form
     measures 2.3x.
     """
     ts:     datetime   # CLOCK_REALTIME at capture — kernel softirq timestamp
@@ -953,7 +957,7 @@ _LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 def main():
-    """Console-script entry point — `nmea2s3`.
+    """Console-script entry point — `nmea2s3-logger`.
 
     Nothing above this reads the environment, so --help and --version work
     on a box that has never been configured.

@@ -203,8 +203,13 @@ winner, and with a PUT-only credential it could not be cleaned up anyway.
 nmea2s3-exporter | jq .                                    # everything, ndjson, to stdout
 nmea2s3-exporter --proto n0183 --since 2026-08-01 -o wk.ndjson   # one protocol
 nmea2s3-exporter --source _log --format csv -o             # audit log, auto-named file
+nmea2s3-exporter --source _log --application nmea2s3-logger      # one tool's entries
 nmea2s3-exporter --proto n2k --format candump | canboat convert   # decode with canboat
 ```
+
+`--proto` and `--application` both filter on the key rather than on rows, so
+neither downloads what it is about to discard — `--proto` matches the object
+name, `--application` is the first path segment of a `_log` key.
 
 **Decoding the archive with canboat is one pipe** — that last line is the
 whole of it, and a day at a time is usually what you want:

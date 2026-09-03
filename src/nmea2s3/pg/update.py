@@ -62,14 +62,15 @@ anything that cannot be rebuilt.
 Required environment variables (see env.example):
   NMEA2S3_S3_ENDPOINT_URL, NMEA2S3_S3_BUCKET,
   NMEA2S3_S3_ACCESS_KEY_ID, NMEA2S3_S3_SECRET_ACCESS_KEY
-  NMEA2S3_PG_HOST, NMEA2S3_PG_PORT, NMEA2S3_PG_DBNAME,
-  NMEA2S3_PG_USER, NMEA2S3_PG_PASSWORD
+  NMEA2S3_PG_HOST, NMEA2S3_PG_DBNAME, NMEA2S3_PG_USER, NMEA2S3_PG_PASSWORD
 
-Optional: NMEA2S3_S3_REGION (default us-east-1)
+Optional: NMEA2S3_S3_REGION (default us-east-1), NMEA2S3_PG_PORT (default
+5432). Not NMEA2S3_SRC_PG_*, which is the legacy database the 0183 importer
+reads FROM — this one writes a derived table it may drop and rebuild.
 
 Install: pipx install git+https://github.com/ghotihook/nmea2s3.git — one
-install, all three commands. This one needs psycopg, nmea2000 and pynmea2;
-the logger imports none of them.
+install, every command. This one needs psycopg, nmea2000 and pynmea2; the
+logger imports none of them.
 """
 
 import argparse

@@ -59,7 +59,6 @@ Functions:
   log_action(s3_client, bucket, application, exit_code, comment, details)
                                       -- write one entry; raises on failure
   log_action_safely(...)             -- same, but never raises (warns to stderr instead) — use this one
-                                      -- wraps a CLI tool's __main__: logs failures, skips clean --help exits
 """
 
 import json

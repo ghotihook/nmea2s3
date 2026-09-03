@@ -446,8 +446,9 @@ def _run_exporter(argv: list[str]):
     captured = {}
 
     def fake_export_source(s3, bucket, source, proto, since, until,
-                            output_path, fmt, verbose):
-        captured.update(source=source, proto=proto, fmt=fmt, output=output_path)
+                            output_path, fmt, verbose, application=None):
+        captured.update(source=source, proto=proto, fmt=fmt, output=output_path,
+                        application=application)
         return 0, 0, 0
 
     saved = (sys.argv, export.make_s3_client, export.export_source)
@@ -459,6 +460,24 @@ def _run_exporter(argv: list[str]):
     finally:
         sys.argv, export.make_s3_client, export.export_source = saved
     return captured
+
+
+def test_one_application_narrows_the_listing_not_the_output():
+    """The application is the first path segment of a `_log` key, so asking
+    for one tool's entries is a narrower LIST rather than a filter applied to
+    everything after downloading it. That is the whole reason the name is in
+    the key."""
+    assert _run_exporter(["--source", "_log",
+                          "--application", "nmea2s3-logger"])["application"] == "nmea2s3-logger"
+
+
+def test_an_application_filter_is_refused_for_captured_traffic():
+    """`raw/` has no application, so the flag would silently do nothing."""
+    try:
+        _run_exporter(["--source", "raw", "--application", "nmea2s3-logger"])
+        assert False, "--application should be refused with --source raw"
+    except SystemExit as e:
+        assert e.code == 2
 
 
 def test_candump_narrows_to_n2k_before_anything_is_downloaded():

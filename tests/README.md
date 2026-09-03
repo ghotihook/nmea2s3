@@ -22,7 +22,8 @@ through the fakes in `helpers.py`.
 | `test_readback.py` | `iter_rows_ndjson_gz` — correctness and memory shape on multi-GB day objects |
 | `test_audit_log.py` | which tools write `_log/` entries, and which deliberately do not |
 | `test_formats.py` | row shapes, field types, key and filename layouts, object headers, the exporter's candump line, and agreement with `SCHEMA.md` |
-| `test_pg.py` | the wide table: bucket grid, device arbitration and `last()` within it, the range guard, and DDL that grows a column |
+| `test_pg.py` | the wide table: bucket grid, device arbitration and `last()` within it, the range guard, unit conversion, and DDL that grows a column |
+| `test_migrate_n0183.py` | the 0183 importer: the record it produces, and the idempotence that makes a re-run free |
 
 ## Why these tests exist
 

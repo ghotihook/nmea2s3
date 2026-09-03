@@ -18,10 +18,11 @@ one. That filter reads the object NAME, which a LIST already returned, so a
 narrowed export downloads nothing it will discard — worth having, since the
 protocols differ in volume by orders of magnitude.
 
-_log is the operational audit log from audit_log.py — same day-partitioned
-layout, but outside raw/ and each object is one plain (non-gzipped) JSON
-record rather than gzip'd ndjson, so it is listed and read differently (see
-iter_log_keys and READERS below). Its `details` field is a nested object: CSV has no native
+_log is the operational audit log from audit_log.py — day-partitioned like
+raw/ but outside it, under a first segment naming the tool that wrote the
+entry, and each object is one plain (non-gzipped) JSON record rather than
+gzip'd ndjson. So it is listed and read differently (see iter_log_keys and
+READERS below), and --application narrows the listing to one tool. Its `details` field is a nested object: CSV has no native
 way to hold that, so csv output flattens it to a JSON string per cell;
 ndjson output keeps it nested, since ndjson supports that natively — one
 real reason to prefer --format csv for _log specifically if you want a
@@ -212,7 +213,8 @@ def make_writer(out, fmt: str, fieldnames: list[str]):
 
 def export_source(s3, bucket: str, source: str, proto: str | None,
                    since: date, until: date,
-                   output_path: Path | None, fmt: str, verbose: bool) -> tuple[int, int, int]:
+                   output_path: Path | None, fmt: str, verbose: bool,
+                   application: str | None = None) -> tuple[int, int, int]:
     """Export one source to output_path (or stdout if None). Returns
     (objects_read, objects_failed, rows_written); the caller turns a
     non-zero objects_failed into exit code 2."""
@@ -234,7 +236,8 @@ def export_source(s3, bucket: str, source: str, proto: str | None,
         objects_read = 0
         objects_failed = 0
         rows_written = 0
-        keys = (iter_log_keys(s3, bucket, since, until) if source == "_log"
+        keys = (iter_log_keys(s3, bucket, since, until, application)
+                if source == "_log"
                 else iter_keys(s3, bucket, since, until, proto))
         for key in keys:
             # A network failure (with its own retries) happens before any
@@ -318,6 +321,11 @@ def main():
                               "Filtered on the object NAME, so nothing else is downloaded at all — "
                               "which matters because the protocols differ in volume by orders of "
                               "magnitude. Default: every protocol, interleaved in one stream")
+    parser.add_argument("--application", metavar="NAME", default=None,
+                         help="With --source _log, export only this tool's entries (e.g. "
+                              "nmea2s3-logger). The application is the first path segment of a "
+                              "_log key, so this narrows the LISTING itself and no other tool's "
+                              "entries are fetched. Default: every application")
     parser.add_argument("--format", choices=["candump", "csv", "ndjson"], default="ndjson",
                          help="Output format (default: ndjson). _log's `details` field is nested — kept as "
                               "real nested JSON in ndjson, flattened to a JSON string per cell in csv. "
@@ -337,6 +345,8 @@ def main():
     args = parser.parse_args()
     if args.proto and args.source != "raw":
         parser.error("--proto only applies to --source raw; the audit log has no protocol")
+    if args.application and args.source != "_log":
+        parser.error("--application only applies to --source _log; captured traffic has no application")
     if args.format == "candump":
         # A candump line is one CAN frame, so the export has to be one
         # protocol whatever the user asked for. Narrowing it here rather
@@ -356,7 +366,7 @@ def main():
         output_path = None
     elif args.output == "":
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        what = args.proto or args.source
+        what = args.proto or args.application or args.source
         output_path = Path(f"{stamp}-{what}.{args.format}")
     else:
         output_path = Path(args.output)
@@ -366,7 +376,7 @@ def main():
     try:
         _read, objects_failed, _rows = export_source(
             s3, config["s3_bucket"], args.source, args.proto, since, until,
-            output_path, args.format, args.verbose)
+            output_path, args.format, args.verbose, args.application)
     except BrokenPipeError:
         # Python ignores SIGPIPE, so a closed reader surfaces as EPIPE on
         # the next write rather than killing us — and would surface AGAIN
