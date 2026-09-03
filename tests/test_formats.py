@@ -32,6 +32,14 @@ def _n2k_row():
     return json.loads(H.frame(L, 0).line)
 
 
+class _Captures:
+    """Accepts any put_object and remembers the last one."""
+    key = body = None
+
+    def put_object(self, Bucket, Key, Body, **kw):
+        self.key, self.body = Key, Body
+
+
 def _log_entry():
     captured = {}
 
@@ -213,7 +221,44 @@ def test_data_key_is_day_partitioned_by_capture_time():
 
 def test_log_key_layout():
     key = _log_entry()["key"]
-    assert re.fullmatch(r"_log/\d{4}/\d{2}/\d{2}/\d{6}-[0-9a-f]{8}\.json", key), key
+    assert re.fullmatch(
+        r"_log/nmea2s3-logger/\d{4}/\d{2}/\d{2}/\d{6}-[0-9a-f]{8}\.json", key), key
+
+
+def test_the_application_is_a_directory_not_a_field_only():
+    """The name is in the KEY so one tool's entries are a prefix: selecting,
+    counting or lifecycle-expiring them costs a LIST, not a GET of every
+    object to read a value out of its body. It stays in the body too — the
+    key is an index, not the record."""
+    captured = {}
+
+    class Rec:
+        def put_object(self, Bucket, Key, Body, **kw):
+            captured.update(key=Key, body=Body)
+
+    audit.log_action(Rec(), "b", "nmea2s3-update-pg", 0, "test", {})
+    assert captured["key"].startswith("_log/nmea2s3-update-pg/")
+    assert json.loads(captured["body"])["application"] == "nmea2s3-update-pg"
+
+
+def test_an_application_that_would_break_the_key_is_refused():
+    """The application names a directory now, so `/` files entries under a
+    path nothing can predict and `..` resolves somewhere else entirely.
+    These credentials cannot delete, so a key written to the wrong place is
+    written forever — refused at the one place every entry is written, the
+    same way record_line() refuses a `proto` that would break a key."""
+    class Rec:
+        def put_object(self, **kw):
+            assert False, "a refused application must never reach the bucket"
+
+    for bad in ("nmea2s3/logger", "..", "", "NMEA2S3-Logger", ".hidden"):
+        try:
+            audit.log_action(Rec(), "b", bad, 0, "test", {})
+            assert False, f"{bad!r} should be refused"
+        except ValueError:
+            pass
+    for good in ("nmea2s3-logger", "nmea2s3-update-pg", "flightrecorder_logger"):
+        audit.log_action(_Captures(), "b", good, 0, "test", {})
 
 
 def test_log_key_is_not_content_addressed():

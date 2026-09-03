@@ -339,16 +339,25 @@ def iter_keys(s3_client, bucket: str, since: date, until: date,
                 yield key
 
 
-def iter_log_keys(s3_client, bucket: str, since: date, until: date):
+def iter_log_keys(s3_client, bucket: str, since: date, until: date,
+                  application: str | None = None):
     """`_log/` keys in range. The audit log is not capture data and does
     not live under raw/ — it has no protocol, is not gzipped and is not
-    content-addressed — so it gets its own two-line listing rather than a
-    mode flag threaded through the one above."""
+    content-addressed — so it gets its own short listing rather than a mode
+    flag threaded through the one above.
+
+    `application` narrows the LIST itself rather than filtering after it,
+    which is the reason that name is a path segment in the key: one tool's
+    entries cost a listing of one tool's entries, and none of the others are
+    ever returned. Without it every application is listed and the date is
+    read one segment deeper — the same single LIST as before the name moved
+    into the key."""
+    prefix = f"_log/{application}/" if application else "_log/"
     paginator = s3_client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix="_log/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            _log, yyyy, mm, dd, _rest = key.split("/", 4)
+            _log, _application, yyyy, mm, dd, _rest = key.split("/", 5)
             if since <= date(int(yyyy), int(mm), int(dd)) <= until:
                 yield key
 

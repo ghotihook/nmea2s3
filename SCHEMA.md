@@ -229,7 +229,31 @@ day-partitioned layout, but NOT gzip'd and NOT content-addressed: each entry
 is a distinct real event, so hashing content would wrongly collapse two
 identical-looking-but-different actions into one, and entries are small
 enough that being able to `cat` one matters more than the bytes. One plain
-JSON object per action, key `_log/<yyyy>/<mm>/<dd>/<HHMMSS>-<random>.json`.
+JSON object per action:
+
+```
+_log/<application>/<yyyy>/<mm>/<dd>/<HHMMSS>-<random>.json
+```
+
+**The application is a directory, not just a field.** `raw/` puts its
+discriminator in the object NAME; this one cannot, because application names
+contain `-` and that is what delimits a name here — `proto` forbids `-` for
+exactly that reason, and an application name belongs to its tool. A path
+segment also buys the thing a name cannot: bucket lifecycle rules match a
+prefix and nothing else, so "expire the importer's entries after 90 days,
+keep the logger's forever" is a rule on the bucket rather than a script
+someone has to remember to run. The logger's are the ones worth keeping — a
+start with no stop is the only record of a run that was killed.
+
+The cost is that one day across all tools is no longer a single prefix.
+`iter_log_keys()` pays it by listing `_log/` whole and reading the date one
+segment deeper, which is the same single LIST as before; passing an
+application narrows the LIST itself instead.
+
+The name must be a usable path segment — lowercase alphanumeric, then any of
+`.` `_` `-`. `log_action()` refuses anything else rather than filing an entry
+under a path that cannot be listed back, which with a PUT-only credential
+would be permanent.
 
 The logger writes two per run: a start entry, and a stop entry. A start with
 no stop after it is a run that died partway — the case no exception handler
