@@ -82,7 +82,14 @@ SELECT
     COALESCE(n2k_latitude, rmc_latitude, gll_latitude)                    AS lat,
     COALESCE(n2k_longitude, rmc_longitude, gll_longitude)                 AS lon,
     COALESCE(n2k_depth, dbt_depth_meters)                                 AS depth,
-    COALESCE(n2k_actualtemperature_0_sea_temperature, mda_water_temp)     AS temp_sea,
+    -- 130316 first: it is the current PGN and 130312 is deprecated in its
+    -- favour, so a modern instrument pack reports there. 130310's generic
+    -- water temperature next, then the 0183 sentence. setTemperature is
+    -- absent on purpose — a set point is not a measurement of the sea.
+    COALESCE(n2k_temperature_0_sea_temperature,
+             n2k_actualtemperature_0_sea_temperature,
+             n2k_watertemperature,
+             mda_water_temp)                                          AS temp_sea,
     COALESCE(n2k_voltage_0, xdr_battv)                                    AS batt_v,
 
     -- how good the fix is, which is what you want the moment a position

@@ -104,20 +104,43 @@ SKIP_LOOKUPS = {"manufacturerCode", "industryCode", "proprietaryId",
 _MS_TO_KN = 1.94384
 
 
-def _deg(x: float) -> float: return round(math.degrees(x), 2)
-def _kn(x: float) -> float:  return round(x * _MS_TO_KN, 3)
+def _deg(x: float) -> float:  return round(math.degrees(x), 2)
+def _kn(x: float) -> float:   return round(x * _MS_TO_KN, 3)
+def _degC(x: float) -> float: return round(x - 273.15, 2)
 
 
 # SI units from the library -> what we store, keyed by field id. A typo here
 # means no conversion fires and the value is stored in radians, which looks
 # entirely plausible — hence keeping the keys identical to the old db_ops
 # originals.
+#
+# EVERY temperature field the library can produce has to be listed. N2K
+# carries them all in Kelvin, and the library names the same physical
+# quantity differently depending on which PGN it came out of, so one entry
+# converts one PGN's path and silently leaves the others in Kelvin:
+#
+#   130312 Temperature (DEPRECATED) ....... actualTemperature
+#   130316 Temperature Extended Range ..... temperature, setTemperature
+#   130310 Environmental Parameters ....... waterTemperature,
+#                                           outsideAmbientAirTemperature
+#
+# Only actualTemperature was listed until 2026-09-03, which meant the
+# DEPRECATED PGN was the one that worked and a current instrument pack —
+# 130316 is what replaced 130312 — stored 293.15 where the other stored
+# 20.0. Nothing downstream could tell them apart: the column name derives
+# from the field id, so both look like a sea temperature, and 293.15 is not
+# an implausible number to anything that does not know the unit.
+#
+# A new temperature field id therefore needs adding HERE, not just a column
+# it happens to produce. tests/test_pg.py holds this as an invariant over
+# every temperature column rather than a list of the four known ones.
 CONVERSIONS: dict[str, Any] = {
     "heading": _deg, "variation": _deg, "position": _deg, "windAngle": _deg,
     "cog": _deg, "set": _deg, "roll": _deg, "pitch": _deg, "yaw": _deg,
     "leewayAngle": _deg, "rate": _deg,
     "speedWaterReferenced": _kn, "windSpeed": _kn, "sog": _kn, "drift": _kn,
-    "actualTemperature": lambda x: round(x - 273.15, 2),
+    "actualTemperature": _degC, "temperature": _degC, "setTemperature": _degC,
+    "waterTemperature": _degC, "outsideAmbientAirTemperature": _degC,
 }
 
 

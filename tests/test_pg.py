@@ -69,6 +69,36 @@ def _system_time(prio: int, src: int, when: datetime, source: int = 0) -> str:
     return f"{can_id:08x}#{payload.hex()}"
 
 
+def _temperature(pgn: int, payload: bytes, prio: int = 5, src: int = 2) -> str:
+    """One of the three temperature PGNs, in the candump form the archive
+    stores. Built from the real wire layout — the whole point is that the
+    library names the same quantity differently per PGN."""
+    return f"{((prio << 26) | (pgn << 8) | src):08x}#{payload.hex()}"
+
+
+def _t130312(kelvin: float) -> str:
+    """Temperature (DEPRECATED). sid, instance, source, actual/set at 0.01 K."""
+    return _temperature(0x1FD08, bytes([0x01, 0x00, 0x00])
+                        + round(kelvin * 100).to_bytes(2, "little")
+                        + round(kelvin * 100).to_bytes(2, "little") + b"\xff")
+
+
+def _t130316(kelvin: float) -> str:
+    """Temperature Extended Range — what replaced 130312, so what a current
+    instrument pack actually sends. actual at 0.001 K, set at 0.1 K."""
+    return _temperature(0x1FD0C, bytes([0x01, 0x00, 0x00])
+                        + round(kelvin * 1000).to_bytes(3, "little")
+                        + round(kelvin * 10).to_bytes(2, "little"))
+
+
+def _t130310(water_k: float, air_k: float) -> str:
+    """Environmental Parameters. water and air at 0.01 K, pressure at 100 Pa."""
+    return _temperature(0x1FD06, bytes([0x01])
+                        + round(water_k * 100).to_bytes(2, "little")
+                        + round(air_k * 100).to_bytes(2, "little")
+                        + (1013).to_bytes(2, "little") + b"\xff")
+
+
 def _fast_packet(can_id: int, data: bytes, seq: int = 0) -> list[str]:
     """A fast-packet PGN split into the frames it actually travels as.
 
@@ -251,6 +281,58 @@ def test_column_names_are_proto_field():
     assert "mwv_wind_angle_r" in fields
     assert not any(f in fields for f in ("sog", "awa", "aws")), \
         "no arbitration: raw field ids are the columns, not resolved names"
+
+
+# ── units ────────────────────────────────────────────────────────────────
+
+def test_every_temperature_is_stored_in_celsius_whatever_pgn_it_came_from():
+    """N2K carries every temperature in Kelvin and the library names the same
+    quantity differently per PGN, so CONVERSIONS is keyed on names that do
+    not generalise. Until 2026-09-03 it listed only `actualTemperature`,
+    which meant the DEPRECATED PGN was the one that worked: a current pack
+    sending 130316 stored 293.15 where an old one stored 20.0, under a
+    column name that gives no hint which it is.
+
+    Asserted over every temperature column rather than the four known field
+    ids, so a PGN nobody has looked at yet fails here rather than in the
+    archive."""
+    twenty_c = 293.15
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n2k", _t130312(twenty_c)))
+    b.add(_rec(T0, "n2k", _t130316(twenty_c)))
+    b.add(_rec(T0, "n2k", _t130310(twenty_c, 298.15)))
+    row = b.rows()[0]
+
+    temps = {k: v for k, v in row.items() if "temperature" in k or "temp" in k}
+    assert temps, "no temperature columns at all — the frames did not decode"
+    for column, value in temps.items():
+        assert value < 100, f"{column} = {value} is Kelvin, not Celsius"
+
+    # The three PGNs reported the same physical temperature, so the columns
+    # they produce must agree — that is the thing a reader relies on.
+    for column in ("n2k_actualtemperature_0_sea_temperature",
+                   "n2k_temperature_0_sea_temperature",
+                   "n2k_watertemperature"):
+        assert column in row, f"{column} missing from {sorted(row)}"
+        assert abs(row[column] - 20.0) < 0.05, f"{column} = {row[column]}"
+
+
+def test_the_sea_temperature_guard_would_not_drop_a_real_reading():
+    """ranges.py bounds sea temperature at (0, 40), which is a Celsius bound.
+    Applied to a column the conversion missed it would reject 293.15 on every
+    single reading — dropping the entire feed rather than the impossible
+    values it exists to catch. So the bound and the conversion have to cover
+    the same set of columns."""
+    from nmea2s3.pg import ranges
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n2k", _t130316(293.15)))
+    b.add(_rec(T0, "n2k", _t130310(293.15, 298.15)))
+    row = b.rows()[0]
+
+    for column, value in row.items():
+        if column in ranges.RANGES and isinstance(value, (int, float)):
+            assert ranges.in_range(column, value), \
+                f"{column} = {value} is a real reading its own bound rejects"
 
 
 # ── the GPS clock, as an ordinary column ─────────────────────────────────

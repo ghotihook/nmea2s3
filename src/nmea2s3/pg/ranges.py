@@ -44,8 +44,22 @@ RANGES: dict[str, tuple[float, float]] = {
     "n2k_longitude": (-180.0, 180.0),
     "xdr_m5_heel": (-90.0, 90.0), "xdr_roll": (-90.0, 90.0), "n2k_roll": (-90.0, 90.0),
     "xdr_m5_pitch": (-90.0, 90.0), "xdr_pitch": (-90.0, 90.0), "n2k_pitch": (-90.0, 90.0),
+    # Sea temperature, in Celsius — which is only true because every
+    # temperature field id is in wire_n2k.CONVERSIONS. Bounding a column the
+    # conversion missed would be worse than leaving it unbounded: 293.15 K
+    # fails (0, 40) on every single reading, so the guard would drop the
+    # whole feed rather than the impossible values it exists to catch.
     "mda_water_temp": (0.0, 40.0),
-    "n2k_actualtemperature_0_sea_temperature": (0.0, 40.0),
+    "n2k_actualtemperature_0_sea_temperature": (0.0, 40.0),   # 130312, deprecated
+    "n2k_temperature_0_sea_temperature": (0.0, 40.0),         # 130316, current
+    "n2k_watertemperature": (0.0, 40.0),                      # 130310
+    # Air, which goes colder and hotter than the water ever does. Still only
+    # catching corrupt data: a yacht's cockpit instrument does not see -30 C
+    # or +60 C in one piece.
+    "n2k_outsideambientairtemperature": (-30.0, 60.0),
+    # setTemperature is deliberately absent. It is a SET POINT — what some
+    # piece of gear was told to hold — not an observation of anything, so
+    # there is no physical bound to assert and no reading to protect.
     # 100 kn is well beyond any wind a sailboat's instruments report in one
     # piece — hurricane-force gusts sit around 150 kn and onboard gear fails
     # well before that — so this only ever catches corrupt data, never

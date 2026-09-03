@@ -20,36 +20,6 @@ archive. So the tiers are
 
 ## P0 — wrong data, or lost frames
 
-### 1. Sea temperature is stored in two different units
-
-`src/nmea2s3/pg/wire_n2k.py:53` — `CONVERSIONS` keys on the decoder's field
-id and lists only `actualTemperature`. The library names the same quantity
-differently in other PGNs, so no conversion fires and Kelvin goes into the
-column. Reproduced — the same 20.00 °C reported three ways:
-
-```
-130312  n2k_actualtemperature_0_sea_temperature      20.0     degC
-130316  n2k_temperature_0_sea_temperature           293.15    KELVIN
-130310  n2k_watertemperature                        293.15    KELVIN
-        n2k_settemperature_0_sea_temperature        293.15    KELVIN
-```
-
-130316 is the *modern* PGN; 130312 is deprecated in favour of it, so a
-current instrument pack is the case that goes wrong. `ranges.py:47` bounds
-only the Celsius column `(0.0, 40.0)`, so the Kelvin ones are unguarded —
-and were that bound ever applied to one, every reading would be dropped as
-impossible. Today `metrics_1s.temp_sea` chains only the Celsius column, so a
-130316 boat silently falls through to `mda_water_temp`.
-
-Fix: four keys in `CONVERSIONS` (`temperature`, `setTemperature`,
-`waterTemperature`, `outsideAmbientAirTemperature`), matching `ranges.py`
-entries, and the `temp_sea` chain in `sql/metrics.sql`.
-
-**Blocks the rebuild.** This changes values in a column that already exists,
-under the same name. Rebuilding part of a range after fixing it leaves that
-column holding Kelvin for old rows and Celsius for new ones, with nothing to
-tell them apart. Fix first, then rebuild once over the whole range.
-
 ### 3. A partial write can duplicate rows into the archive
 
 `src/nmea2s3/logger.py:669-681` — `_objects()` splits by capture day, so a
@@ -234,6 +204,8 @@ placeholders left to miscount.)
 | `7b0aff5` | The unit ran as an unprivileged user from `~/.local/bin`. Now root from a `pipx --global` install, spooling to `/var/lib/nmea2s3` — the default `Path.home()/n2k_fallback` is `/root/...` as root, which `ProtectHome=read-only` blocks, so it would have started clean and been unable to write a frame |
 | `17ea6da` | The spool was pinned with `Environment=`, which `EnvironmentFile=` overrides whatever the order — so `/etc/nmea2s3/env` had the last word on a path only the unit's sandbox permits. Now `--disk-dir`, which is not in that contest |
 | `2ced7e1` | **`_log/` keys carry the application as a directory.** It was a body field only, so selecting or removing one tool's entries meant GETting every object — and lifecycle rules, which match a prefix and nothing else, could not target them at all |
+| `0c44842` | The 0183 importer moved into this repo as `nmea2s3-migrate-n0183`. It was converting a naive `received_at` with `.astimezone()`, which assumes the local zone rather than failing — a `timestamp without time zone` column imported from a Sydney-set box filed every row ten hours early, invisibly and permanently. Now refused |
+| `d539a10` | **Item 1 above.** Every temperature field id converts to Celsius, not just the deprecated PGN's. `ranges.py` and the `temp_sea` chain follow |
 | `65235f3` | **Item 2 above.** The start audit entry was awaited before the listener existed: out of coverage at power-up, up to 60s in which the one process that cannot re-read its input captured nothing |
 
 ---
