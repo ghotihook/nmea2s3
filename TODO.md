@@ -50,18 +50,6 @@ under the same name. Rebuilding part of a range after fixing it leaves that
 column holding Kelvin for old rows and Celsius for new ones, with nothing to
 tell them apart. Fix first, then rebuild once over the whole range.
 
-### 2. Startup blocks capture on an S3 round trip
-
-`src/nmea2s3/logger.py:431-457` — `start()` awaits the `_log/` start entry
-before creating `_can_listener`. The client is built with
-`retries={"max_attempts": 0}` but `connect_timeout=10, read_timeout=60`, so
-out of coverage — the normal case at power-up on a boat — nothing is
-captured for up to 10 s (black-holed connect) or 60 s (connected, no
-response). Frames lost from the one process that cannot re-run, spent on a
-best-effort log line.
-
-Fix: create the listener task first, fire the audit entry alongside it.
-
 ### 3. A partial write can duplicate rows into the archive
 
 `src/nmea2s3/logger.py:669-681` — `_objects()` splits by capture day, so a
@@ -235,6 +223,17 @@ the process exists and has to name it independently.
 (The second half of this item — `README.md` calling the unit a template with
 "three placeholders" — went away with the root/global rewrite: there are no
 placeholders left to miscount.)
+
+---
+
+## Done — 2026-09-03
+
+| commit | what |
+|---|---|
+| `7b0aff5` | The unit ran as an unprivileged user from `~/.local/bin`. Now root from a `pipx --global` install, spooling to `/var/lib/nmea2s3` — the default `Path.home()/n2k_fallback` is `/root/...` as root, which `ProtectHome=read-only` blocks, so it would have started clean and been unable to write a frame |
+| `17ea6da` | The spool was pinned with `Environment=`, which `EnvironmentFile=` overrides whatever the order — so `/etc/nmea2s3/env` had the last word on a path only the unit's sandbox permits. Now `--disk-dir`, which is not in that contest |
+| `2ced7e1` | **`_log/` keys carry the application as a directory.** It was a body field only, so selecting or removing one tool's entries meant GETting every object — and lifecycle rules, which match a prefix and nothing else, could not target them at all |
+| `65235f3` | **Item 2 above.** The start audit entry was awaited before the listener existed: out of coverage at power-up, up to 60s in which the one process that cannot re-read its input captured nothing |
 
 ---
 
