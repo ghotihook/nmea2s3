@@ -205,7 +205,7 @@ placeholders left to miscount.)
 | `17ea6da` | The spool was pinned with `Environment=`, which `EnvironmentFile=` overrides whatever the order — so `/etc/nmea2s3/env` had the last word on a path only the unit's sandbox permits. Now `--disk-dir`, which is not in that contest |
 | `2ced7e1` | **`_log/` keys carry the application as a directory.** It was a body field only, so selecting or removing one tool's entries meant GETting every object — and lifecycle rules, which match a prefix and nothing else, could not target them at all |
 | `0c44842` | The 0183 importer moved into this repo as `nmea2s3-migrate-n0183`. It was converting a naive `received_at` with `.astimezone()`, which assumes the local zone rather than failing — a `timestamp without time zone` column imported from a Sydney-set box filed every row ten hours early, invisibly and permanently. Now refused |
-| `d539a10` | **Item 1 above.** Every temperature field id converts to Celsius, not just the deprecated PGN's. `ranges.py` and the `temp_sea` chain follow |
+| `319558b` | **Item 1 above.** Every temperature field id converts to Celsius, not just the deprecated PGN's. `ranges.py` and the `temp_sea` chain follow |
 | `65235f3` | **Item 2 above.** The start audit entry was awaited before the listener existed: out of coverage at power-up, up to 60s in which the one process that cannot re-read its input captured nothing |
 
 ---
