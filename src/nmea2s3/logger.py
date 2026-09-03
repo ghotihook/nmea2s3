@@ -421,7 +421,16 @@ class N2KLogger:
     # line is not in that contest.
     def __init__(self, can_iface: str = "can0", disk_dir: str | Path | None = None):
         self.can_iface  = can_iface   # SocketCAN interface name
-        self.disk_dir   = Path(disk_dir) if disk_dir else DISK_DIR
+        # An EMPTY disk_dir is an error, not "unset". `--disk-dir "$SPOOL"`
+        # with SPOOL unset is one shell expansion away, and Path("") is
+        # Path("."): the spool would follow the working directory, which
+        # under this unit is / and read-only. If a stale directory happened
+        # to exist there, mkdir(exist_ok=True) would succeed and the only
+        # symptom would be the per-flush spool warning — frames dropped by a
+        # service that looks healthy.
+        if disk_dir is not None and not str(disk_dir).strip():
+            raise ValueError("--disk-dir was given an empty path")
+        self.disk_dir   = Path(disk_dir) if disk_dir is not None else DISK_DIR
         self.buffer: deque[Frame] = deque()
         self.buffer_bytes = 0
         self.running    = False

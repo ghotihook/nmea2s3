@@ -261,6 +261,38 @@ def test_an_application_that_would_break_the_key_is_refused():
         audit.log_action(_Captures(), "b", good, 0, "test", {})
 
 
+def test_entries_from_before_the_application_moved_are_still_readable():
+    """`_log/` is permanent — nothing here can delete — so every entry written
+    under the old five-segment layout is in the bucket forever. A reader that
+    only understood the new one aborted on the first of them, and did it while
+    advancing the generator rather than inside the exporter's per-key `try`,
+    so one legacy object made the audit log unreadable by its own tool."""
+    from nmea2s3.ndjson import iter_log_keys
+
+    class Listing:
+        def get_paginator(self, _):
+            class P:
+                def paginate(self, **kw):
+                    prefix = kw.get("Prefix", "")
+                    keys = ["_log/2026/08/24/120000-abcd1234.json",              # old
+                            "_log/nmea2s3-logger/2026/08/24/120001-ffff0000.json",
+                            "_log/malformed.json",
+                            "_log/nmea2s3-logger/20xx/08/24/120002-ffff0001.json"]
+                    yield {"Contents": [{"Key": k} for k in keys
+                                        if k.startswith(prefix)]}
+            return P()
+
+    got = list(iter_log_keys(Listing(), "b", date(2026, 8, 1), date(2026, 8, 31)))
+    assert len(got) == 2, f"expected both dated keys, got {got}"
+    assert any(k.startswith("_log/2026/") for k in got), "the old layout was dropped"
+
+    # An application filter cannot match the old keys: their key does not say
+    # which tool wrote it, which is the defect the new layout exists to fix.
+    scoped = list(iter_log_keys(Listing(), "b", date(2026, 8, 1), date(2026, 8, 31),
+                                "nmea2s3-logger"))
+    assert scoped == ["_log/nmea2s3-logger/2026/08/24/120001-ffff0000.json"]
+
+
 def test_log_key_is_not_content_addressed():
     """Two identical entries are two real events, so they must not collapse to
     one key the way data objects deliberately do."""

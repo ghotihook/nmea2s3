@@ -156,6 +156,98 @@ def test_a_dry_run_reports_what_would_change_and_writes_nothing():
     assert not s3.puts, "a dry run reached the bucket"
 
 
+# ── the run record: "did it finish?" answered from the bucket ────────────
+
+def test_an_interrupted_import_is_not_recorded_as_having_finished():
+    """A full import runs for over an hour, so Ctrl-C is the likeliest way one
+    ends early — and KeyboardInterrupt is not an Exception. Catching the
+    narrower type still ran the `finally`, which wrote `exit_code: 0` and
+    "import FINISHED ... {start_day} to {end_day}": a matched start/end pair
+    in a bucket nothing can delete from, claiming a range the run never
+    reached. That is exactly the lie the pairing exists to make impossible."""
+    entries = _run_main_with(export_day=_raises(KeyboardInterrupt))
+    end = [e for e in entries if e.get("event") == "end"]
+    assert end, f"no end entry written: {entries}"
+    assert end[0]["exit_code"] == 1, "an interrupted run recorded as clean"
+    assert "FAILED" in end[0]["comment"], end[0]["comment"]
+
+
+def test_a_completed_import_is_recorded_as_finished():
+    """The other half: an end entry is written even when nothing was uploaded,
+    because "completed, every day already correct" must stay distinguishable
+    from "died partway"."""
+    entries = _run_main_with(export_day=lambda *a, **kw: (0, "empty"))
+    end = [e for e in entries if e.get("event") == "end"]
+    assert end and end[0]["exit_code"] == 0
+    assert "FINISHED" in end[0]["comment"], end[0]["comment"]
+
+
+def test_a_naive_minimum_timestamp_refuses_to_pick_a_start_date():
+    """Same refusal as row_to_line(), for the same reason: .astimezone() on a
+    naive value assumes the runner's local zone rather than failing. Unchecked
+    it picked a start_day shifted by that offset and wrote the wrong range
+    into the start audit entry before failing on the first row."""
+    naive = datetime(2026, 8, 24, 12, 0, 0)
+
+    class Conn:
+        def cursor(self, name=None):
+            class C:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def execute(self, *a): pass
+                def fetchone(self): return (naive,)
+            return C()
+
+    try:
+        M.earliest_data_date(Conn(), "raw_n0183")
+        assert False, "a naive minimum should be refused"
+    except SystemExit as e:
+        assert "no timezone" in str(e), e
+
+
+def _raises(exc):
+    def boom(*a, **kw):
+        raise exc()
+    return boom
+
+
+def _run_main_with(export_day):
+    """Drive main() --live with Postgres and S3 stubbed out, and return the
+    audit entries it wrote. The property under test lives in main()'s
+    try/except/finally, so it cannot be reached any other way."""
+    import sys as _sys
+    entries = []
+
+    class Conn:
+        def cursor(self, name=None): raise AssertionError("not reached")
+        def rollback(self): pass
+        def close(self): pass
+
+    saved = (_sys.argv, M.psycopg.connect, M.export_day, M.make_s3_client,
+             M.load_config, M.log_action_safely, M.earliest_data_date)
+    _sys.argv = ["nmea2s3-migrate-n0183", "--live",
+                 "--since", "2026-08-01", "--until", "2026-08-03"]
+    M.psycopg.connect = lambda **kw: Conn()
+    M.export_day = export_day
+    M.make_s3_client = lambda *a, **kw: object()
+    M.load_config = lambda: {k: "x" for k in (
+        "pg_host", "pg_port", "pg_dbname", "pg_user", "pg_password",
+        "s3_endpoint_url", "s3_bucket", "s3_region",
+        "s3_access_key_id", "s3_secret_access_key")}
+    M.log_action_safely = lambda s3, b, app, code, comment, details=None: entries.append(
+        {"application": app, "exit_code": code, "comment": comment, **(details or {})})
+    M.earliest_data_date = lambda *a: date(2026, 8, 1)
+    try:
+        try:
+            M.main()
+        except BaseException:
+            pass          # the traceback belongs to the operator, not the test
+        return entries
+    finally:
+        (_sys.argv, M.psycopg.connect, M.export_day, M.make_s3_client,
+         M.load_config, M.log_action_safely, M.earliest_data_date) = saved
+
+
 def test_the_rows_are_ordered_before_they_are_hashed():
     """Ordering is what makes the content id reproducible: raw_n0183 has no
     primary key, so rows tying on received_at are free to come back in any

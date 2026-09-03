@@ -65,12 +65,23 @@ object that these credentials cannot delete:
      run to run. This is the strongest reason to call nmea2s3's
      record_line() rather than build JSON locally.
 
-Nothing is ever deleted — structurally, not just by policy: the production
-credentials are write/list only. If a day's source data genuinely changes
+Nothing is ever deleted: this issues no delete, and the credential it runs
+under does not need to be able to. If a day's source data genuinely changes
 between runs, the new content gets its own key and is uploaded alongside
 the old one. Both persist. A day holding more than one object is a real,
 visible signal that its source changed after an earlier export, not
 something to paper over by picking a winner.
+
+The credential DOES need read, though, which the logger's does not. The
+reconciliation above is a HEAD per day (object_exists), and HEAD is
+s3:GetObject: with a PUT+LIST-only key a MISSING object answers 404 and a
+PRESENT one answers 403 AccessDenied — which is non-retryable, so it
+propagates and ends the run. That is the second-run case, the one the whole
+no-state-file design is built around, so it would fail exactly when the
+reconciliation was doing its job. Run this with a key that can list, read
+and put; delete is neither needed nor wanted. (Reconciling with a
+list_objects_v2 on the day prefix instead would drop the read requirement —
+worth doing if this ever has to run under the logger's own key.)
 
 A day is only checked once fully in the past (received_at < now - lag), so
 late-arriving rows for an in-progress day don't add a new object for the
@@ -189,6 +200,16 @@ def earliest_data_date(conn, table: str) -> date:
         (min_ts,) = cur.fetchone()
         if min_ts is None:
             raise SystemExit(f"{table} is empty; nothing to export")
+        if min_ts.tzinfo is None or min_ts.tzinfo.utcoffset(min_ts) is None:
+            # Same refusal as row_to_line(), and for the same reason:
+            # .astimezone() on a naive value assumes this machine's local
+            # zone rather than failing. Unchecked here it picks a start_day
+            # shifted by the runner's offset, writes that range into the
+            # start audit entry, and only then fails on the first row.
+            raise SystemExit(
+                f"{table}.received_at has no timezone. Refusing to guess a "
+                "start date: cast it in the source query, e.g. "
+                "received_at AT TIME ZONE 'UTC' AT TIME ZONE 'UTC'")
         return min_ts.astimezone(timezone.utc).date()
 
 
@@ -365,11 +386,26 @@ def main():
                 days_checked += 1
                 days_uploaded += (outcome == "uploaded")
                 day += timedelta(days=1)
-        except Exception as e:
+                # End the read transaction each day. psycopg opens one at the
+                # first execute() and holds it until close, so a full import
+                # left the SOURCE database idle in transaction for hours,
+                # holding off autovacuum on a production table this tool
+                # describes as the last copy of its data. rollback() rather
+                # than commit() because nothing here writes to Postgres.
+                conn.rollback()
+        except BaseException as e:
             # A run that writes some days and then dies is a fact worth
             # keeping in the bucket, so the end entry is written either way —
             # with the exit code and the day it got to. Then it re-raises:
             # the traceback belongs on the terminal of whoever ran it.
+            #
+            # BaseException, not Exception: Ctrl-C is the single likeliest way
+            # an hour-long import ends early, and KeyboardInterrupt is not an
+            # Exception. `finally` ran regardless, so catching the narrower
+            # type recorded an interrupted run as `exit_code: 0` and "import
+            # FINISHED ... {start_day} to {end_day}" — a matched start/end
+            # pair claiming a range it never reached, which is precisely the
+            # lie the pairing exists to make impossible.
             failure = e
             raise
         finally:

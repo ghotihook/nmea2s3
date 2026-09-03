@@ -332,6 +332,16 @@ ledger table of consumed keys makes it safe to run on a cron over an
 overlapping window. `--rebuild` reprocesses anyway — every write is an
 upsert keyed on `ts`.
 
+> **A unit change needs a rebuild of the WHOLE range, in one go.** As of
+> 2026-09-03 every N2K temperature is stored in Celsius; before that, only
+> PGN 130312's was, and 130316, 130310 and the set point held Kelvin under
+> column names that say nothing about the unit. Rebuilding part of a range
+> leaves those columns holding 293.15 for old rows and 20.0 for new ones with
+> nothing in the data to tell them apart — and `metrics_1s.temp_sea` now
+> prefers 130316, so an un-rebuilt bucket reads *worse* than before, not just
+> differently. Any conversion added to `wire_n2k.CONVERSIONS` has the same
+> property. Rebuild everything, once, or drop the table and start it again.
+
 ### Two layers, and the names say which is which
 
 | | | |

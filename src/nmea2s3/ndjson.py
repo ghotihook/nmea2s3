@@ -362,8 +362,26 @@ def iter_log_keys(s3_client, bucket: str, since: date, until: date,
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            _log, _application, yyyy, mm, dd, _rest = key.split("/", 5)
-            if since <= date(int(yyyy), int(mm), int(dd)) <= until:
+            # BOTH layouts are read. Entries written before the application
+            # moved into the key have five segments rather than six, and they
+            # are permanent — nothing here can delete, which is the whole
+            # reason the audit log is trusted — so a reader that only
+            # understood the new shape would abort on the first old object and
+            # make the log unreadable by its own tool. Note that `application`
+            # cannot match them: their key does not say which tool wrote it,
+            # which is exactly the defect the new layout fixes.
+            parts = key.split("/")
+            if len(parts) == 6:
+                yyyy, mm, dd = parts[2:5]
+            elif len(parts) == 5:
+                yyyy, mm, dd = parts[1:4]
+            else:
+                continue
+            try:
+                day = date(int(yyyy), int(mm), int(dd))
+            except ValueError:
+                continue    # not a dated key; skip it rather than end the export
+            if since <= day <= until:
                 yield key
 
 

@@ -27,6 +27,20 @@ def _logger(spool=None):
     return lg
 
 
+def test_an_empty_disk_dir_is_refused_rather_than_ignored():
+    """`--disk-dir "$SPOOL"` with SPOOL unset is one shell expansion away, and
+    Path("") is Path("."): the spool would follow the working directory, which
+    under the unit is / and read-only. If a directory happened to exist there,
+    mkdir(exist_ok=True) succeeds and the only symptom is the per-flush spool
+    warning — frames dropped by a service that looks entirely healthy."""
+    for empty in ("", "   "):
+        try:
+            L.N2KLogger("can0", disk_dir=empty)
+            assert False, f"{empty!r} should be refused"
+        except ValueError:
+            pass
+
+
 def _fill(lg, n, **kw):
     for i in range(n):
         lg._append(H.frame(L, i, **kw))
