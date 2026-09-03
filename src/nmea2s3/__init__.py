@@ -19,4 +19,4 @@ record shape, the gzip and content-addressing conventions), audit_log.py
 those write, and the tests check the two against each other.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -4,7 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nmea2s3"
-version = "0.2.0"
+# Read from src/nmea2s3/__init__.py rather than repeated here. The point of
+# the version is that `nmea2s3-logger --version` in the journal answers "what
+# is actually running on the boat" — two copies that can drift make it a
+# guess, and the copy argparse prints is the module's.
+dynamic = ["version"]
 description = "NMEA 2000 raw capture logger: SocketCAN frames to an S3-compatible bucket, with a local spool that survives outages"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -54,6 +58,9 @@ nmea2s3-update-pg = "nmea2s3.pg.update:main"
 # Temporary: a one-way bridge out of the pre-nmea2s3 Postgres schema. Goes
 # away with migrate_n0183.py once there is no old data left to move.
 nmea2s3-migrate-n0183 = "nmea2s3.migrate_n0183:main"
+
+[tool.hatch.version]
+path = "src/nmea2s3/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nmea2s3"]
