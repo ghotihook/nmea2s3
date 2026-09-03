@@ -440,33 +440,33 @@ class N2KLogger:
         for stale in self.disk_dir.glob("*.tmp"):
             stale.unlink(missing_ok=True)
         self.running = True
-        await asyncio.to_thread(
-            log_action_safely, self.s3, self.bucket, APPLICATION, 0,
-            f"logger started — device={DEVICE_ID} can={self.can_iface}",
-            {
-                "device_id": DEVICE_ID, "can_iface": self.can_iface,
-                # Session origin, so a reader can tell which boot a run
-                # belongs to without inferring it from frame data.
-                "clock_epoch": round(time.time() - time.monotonic(), 6),
-                # The SAME clock every frame's `mono` is read from, so this
-                # is directly comparable with them: it is `mono` at the moment
-                # capture began. On every platform that matters that clock
-                # starts at boot, so a small value means a fresh boot and the
-                # value itself IS the capture lost to booting — two real
-                # reboots cost 6.7 and 14.6 minutes, and establishing that
-                # meant subtracting clock_epoch from the first frame by hand.
-                #
-                # Deliberately not /proc/uptime: this is stdlib, needs no
-                # filesystem, and cannot disagree with the frames.
-                "mono_at_start": round(time.monotonic(), 1),
-                # Anything here was left by the previous run and is about to
-                # be replayed. A count, not a size: the size needed .stat() on
-                # every file, which meant a second walk and a race with the
-                # upload loop deleting them — machinery for a number the
-                # journal already prints.
-                "spool_files": len(list(self.disk_dir.glob("disk.*.ndjson.gz"))),
-            },
-        )
+
+        # Read BEFORE any loop starts. Every value here describes the moment
+        # capture began, and spool_files in particular is a count the upload
+        # loop begins destroying the instant it runs.
+        start_details = {
+            "device_id": DEVICE_ID, "can_iface": self.can_iface,
+            # Session origin, so a reader can tell which boot a run
+            # belongs to without inferring it from frame data.
+            "clock_epoch": round(time.time() - time.monotonic(), 6),
+            # The SAME clock every frame's `mono` is read from, so this
+            # is directly comparable with them: it is `mono` at the moment
+            # capture began. On every platform that matters that clock
+            # starts at boot, so a small value means a fresh boot and the
+            # value itself IS the capture lost to booting — two real
+            # reboots cost 6.7 and 14.6 minutes, and establishing that
+            # meant subtracting clock_epoch from the first frame by hand.
+            #
+            # Deliberately not /proc/uptime: this is stdlib, needs no
+            # filesystem, and cannot disagree with the frames.
+            "mono_at_start": round(time.monotonic(), 1),
+            # Anything here was left by the previous run and is about to
+            # be replayed. A count, not a size: the size needed .stat() on
+            # every file, which meant a second walk and a race with the
+            # upload loop deleting them — machinery for a number the
+            # journal already prints.
+            "spool_files": len(list(self.disk_dir.glob("disk.*.ndjson.gz"))),
+        }
 
         tasks = [
             asyncio.create_task(self._can_listener()),
@@ -474,6 +474,25 @@ class N2KLogger:
             asyncio.create_task(self._upload_loop()),
             asyncio.create_task(self._stats_loop()),
         ]
+
+        # The start entry goes out ALONGSIDE capture, never in front of it.
+        # Awaiting it here put an S3 round trip between this process and its
+        # first frame, on a client built with connect_timeout=10,
+        # read_timeout=60 and no retries: out of coverage at power-up — the
+        # NORMAL case on a boat, not the edge one — that was up to 10s (a
+        # black-holed connect) or 60s (connected, no answer) of frames lost
+        # from the one process whose input cannot be re-read, spent on a
+        # best-effort log line.
+        #
+        # Deliberately NOT in `tasks`: it is the one task here that is
+        # SUPPOSED to finish, and the wait(FIRST_COMPLETED) below reads a
+        # finished task as a loop that died. A successful log write would
+        # have taken the logger down with it.
+        audit = asyncio.create_task(asyncio.to_thread(
+            log_action_safely, self.s3, self.bucket, APPLICATION, 0,
+            f"logger started — device={DEVICE_ID} can={self.can_iface}",
+            start_details,
+        ))
         # None of these should ever return on its own, so if one does,
         # stop the others and re-raise whatever stopped it: the process
         # exits non-zero and systemd restarts it.
@@ -488,7 +507,13 @@ class N2KLogger:
         finally:
             for t in tasks:
                 t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # `audit` is cancelled rather than awaited: on the shutdown path
+            # a log write still waiting on its 60s read timeout would hold
+            # the stop open for all of it. Cancelling returns here at once —
+            # the worker thread behind to_thread finishes on its own, bounded
+            # by that same timeout and well inside TimeoutStopSec.
+            audit.cancel()
+            await asyncio.gather(*tasks, audit, return_exceptions=True)
         for t in done:
             t.result()      # re-raises if that is why it stopped
         raise RuntimeError("[n2k] a logger loop exited on its own")

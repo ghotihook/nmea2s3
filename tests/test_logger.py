@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -543,6 +544,70 @@ def _start_entry(lg):
 
     with H.AuditLog() as log:
         return asyncio.run(scenario(log))
+
+
+def test_capture_starts_without_waiting_for_the_audit_write():
+    """The start entry used to be AWAITED before the listener was created, on
+    a client built with connect_timeout=10, read_timeout=60 and no retries.
+    Out of coverage at power-up — the normal case on a boat, not the edge one
+    — that was up to a minute in which the one process whose input cannot be
+    re-read captured nothing, spent on a best-effort log line.
+
+    Here the audit PUT blocks outright. The listener must still be running
+    long before it returns."""
+    lg = _logger()
+    _idle_loops(lg)
+
+    listening = asyncio.Event()
+
+    async def listener():
+        listening.set()
+        while True:
+            await asyncio.sleep(1)
+
+    lg._can_listener = listener
+
+    release = threading.Event()
+
+    class Blocking(H.FakeS3):
+        def put_object(self, Bucket, Key, Body, **kw):
+            release.wait(10)      # far longer than the assertion below allows
+            super().put_object(Bucket, Key, Body, **kw)
+
+    lg.s3 = Blocking()
+
+    async def scenario():
+        task = asyncio.create_task(lg.start())
+        try:
+            # Fails by TimeoutError if start() is once again waiting on S3.
+            await asyncio.wait_for(listening.wait(), timeout=2.0)
+        finally:
+            release.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_a_finished_audit_write_does_not_look_like_a_dead_loop():
+    """start() supervises its four loops with wait(FIRST_COMPLETED) and treats
+    any task that finishes as one that died. The audit write is the one task
+    there that is SUPPOSED to finish, so putting it in that set would take the
+    logger down on a SUCCESSFUL log write."""
+    lg = _logger()
+    _idle_loops(lg)
+
+    async def scenario(log):
+        task = asyncio.create_task(lg.start())
+        await _await_entry(log)          # the write has now completed
+        await asyncio.sleep(0.05)        # ... and start() must be unmoved
+        alive = not task.done()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert alive, "a completed audit write ended the logger"
+
+    with H.AuditLog() as log:
+        asyncio.run(scenario(log))
 
 
 def test_the_start_record_says_how_much_booting_cost():
