@@ -88,6 +88,17 @@ class FakeS3:
     def get_object(self, Bucket, Key):
         return {"Body": _Body(self.puts[Key])}
 
+    def head_object(self, Bucket, Key):
+        # 404 for an absent key, the way object_exists() expects to learn it.
+        if not self.up:
+            self._fail("HeadObject")
+        if Key not in self.puts:
+            from botocore.exceptions import ClientError
+            raise ClientError({"Error": {"Code": "404"},
+                               "ResponseMetadata": {"HTTPStatusCode": 404}},
+                              "HeadObject")
+        return {"ContentLength": len(self.puts[Key])}
+
     # what the objects actually contain, for assertions
     def rows(self, key=None) -> list[dict]:
         keys = [key] if key else sorted(self.puts)

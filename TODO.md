@@ -99,10 +99,11 @@ Each verified against the code:
   PyPI; `README.md:24` installs from git.
 - `src/nmea2s3/logger.py:919` — "Console-script entry point — `nmea2s3`".
   The script is `nmea2s3-logger`.
-- `src/nmea2s3/audit_log.py:14-15,53-55` — describes start/end entries "paired
-  by a `run_id` in `details`". No tool writes a `run_id`, and `SCHEMA.md:222`
-  says the opposite explicitly. `:40` also carries an orphaned bullet line
-  describing the `__main__` wrapper the docstring itself says was removed.
+- `src/nmea2s3/audit_log.py` — the "orphaned bullet" in the function index
+  still describes the `__main__` wrapper the docstring itself says was
+  removed. (The `run_id` half of this item is resolved: `nmea2s3-migrate-n0183`
+  writes start/end entries paired that way, and `SCHEMA.md` now documents it
+  rather than denying it.)
 - `src/nmea2s3/pg/update.py:65` lists `NMEA2S3_PG_PORT` as required;
   `load_config():117` defaults it to 5432, and `env.example` has it optional.
 - `src/nmea2s3/pg/ranges.py:26` says signed fields are "folded to (-180, 180]";

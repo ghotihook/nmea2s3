@@ -267,6 +267,16 @@ month. The two exceptions are the two facts the ledger loses if the derived
 database is ever dropped — that a column appeared, and that a rebuild was
 ordered.
 
+`nmea2s3-migrate-n0183` writes two per LIVE run, paired by a `run_id` in
+`details` and carrying `event: start` / `event: end`. It needs explicit
+pairing where the logger does not: a full import runs for over an hour, and
+"did it finish?" has to be answerable from the bucket afterwards. The end
+entry is written even when the run uploaded nothing, because "completed,
+every day already correct" and "died partway" must stay distinguishable, and
+even when the run FAILED, carrying the exit code and the day it reached. A
+dry run writes neither — it never touches the bucket, so there is no run to
+account for.
+
 | field | type | notes |
 |---------------|-------------------|-------|
 | `timestamp` | string (ISO 8601) | when logged — the one place upload time IS the meaningful time |
@@ -274,7 +284,7 @@ ordered.
 | `host` | string | hostname of the machine that ran it |
 | `exit_code` | integer | 0 = success; 1 = failed. Only tools that CHANGE something write entries, so a read-only run never appears |
 | `comment` | string | human-readable summary |
-| `details` | object | freeform, varies per application — see below for what this logger writes. A tool whose runs need explicit pairing may add its own `event: start`/`end` and a `run_id`; this logger does not, and its entries pair by `host` and time order |
+| `details` | object | freeform, varies per application — see below for what this logger writes. A tool whose runs need explicit pairing adds its own `event: start`/`end` and a `run_id`, as `nmea2s3-migrate-n0183` does; this logger does not, and its entries pair by `host` and time order |
 
 Written with sorted keys and two-space indentation. A logger stop entry:
 

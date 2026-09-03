@@ -43,17 +43,20 @@ the journal tells you truthfully what is running:
 sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git@v0.1.0
 ```
 
-Three commands land on your `PATH`:
+Four commands land on your `PATH`:
 
 | command | does |
 |---|---|
 | `nmea2s3-logger` | the logger — SocketCAN to S3, meant to run under systemd |
 | `nmea2s3-exporter` | read the archive back out as ndjson or CSV |
 | `nmea2s3-update-pg` | archive → a wide Postgres table |
+| `nmea2s3-migrate-n0183` | legacy Postgres → the archive; temporary, see below |
 
-Python 3.10+, Linux for the logger (SocketCAN); the other two run anywhere.
-Dependencies are boto3 for the logger and exporter, and psycopg, nmea2000
-and pynmea2 for the Postgres side.
+Python 3.10+, Linux for the logger (SocketCAN); the other three run
+anywhere. Dependencies are boto3 for everything that touches the bucket,
+psycopg for both Postgres tools, and nmea2000 with pynmea2 for the decoding
+`nmea2s3-update-pg` does — the importer needs neither, since it moves rows
+verbatim and decodes nothing.
 
 **The logger imports boto3 and the stdlib, and nothing else** — not the
 decoders, not the database driver. Installing them alongside it does not put
@@ -159,6 +162,40 @@ is simply ignored rather than obeyed-and-broken. To put the spool elsewhere —
 a USB stick, if SD/eMMC wear is a concern — change `--disk-dir` in the unit
 and add a matching `ReadWritePaths=`. Run by hand, with no flag, it falls back
 to `$NMEA2S3_DISK_DIR` and then `~/n2k_fallback`.
+
+## Importing the 0183 history
+
+`nmea2s3-migrate-n0183` is a one-way bridge out of the pre-nmea2s3 Postgres
+schema, and it is here only while there is still old data to move. It writes
+the same record and the same key layout as the logger because it calls the
+same functions — an earlier version lived in another repo with its own copy
+of both, and they drifted, which is the one thing a permanent archive cannot
+afford.
+
+It keeps **no state file**. Every run rechecks the whole requested range,
+recomputes each day's content id, and reconciles against what is actually in
+the bucket — so a re-run is free and an interrupted run needs no recovery.
+That only holds because identical rows produce identical bytes: the query
+orders on every column that reaches the output, and a day is always exactly
+one object however many rows it has.
+
+**Every run is a dry run without `--live`**, so a copy-pasted command cannot
+write to a bucket nothing can delete from.
+
+```bash
+nmea2s3-migrate-n0183 -v                       # what WOULD change
+nmea2s3-migrate-n0183 --since 2026-01-01 --live
+```
+
+It reads `NMEA2S3_SRC_PG_*`, which is deliberately not the `NMEA2S3_PG_*`
+that `nmea2s3-update-pg` uses: those name two databases pointing opposite
+ways. This one reads a legacy table that is the last copy of its data;
+update-pg writes a derived table it may drop and rebuild at will.
+
+A day that already matches is skipped. A day whose source data genuinely
+changed since an earlier run lands as a *second* object beside the first —
+that is a real signal worth seeing, not something to resolve by picking a
+winner, and with a PUT-only credential it could not be cleaned up anyway.
 
 ## Read it back
 

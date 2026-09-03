@@ -51,6 +51,9 @@ Issues = "https://github.com/ghotihook/nmea2s3/issues"
 nmea2s3-logger = "nmea2s3.logger:main"
 nmea2s3-exporter = "nmea2s3.export:main"
 nmea2s3-update-pg = "nmea2s3.pg.update:main"
+# Temporary: a one-way bridge out of the pre-nmea2s3 Postgres schema. Goes
+# away with migrate_n0183.py once there is no old data left to move.
+nmea2s3-migrate-n0183 = "nmea2s3.migrate_n0183:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nmea2s3"]
