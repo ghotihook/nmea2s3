@@ -14,7 +14,7 @@ seen.
 `observations` is what the instruments SAID: every field, every device, no
 judgement. It is not the table to query day to day — a view over it resolves
 the instrument chains, and that is what a dashboard should read.
-sql/fr_metrics.sql is one, written for a table ingested with `--table
+sql/metrics_1s.sql is one, written for a table ingested with `--table
 fr_observations`.
 
 The bucket and the table name move independently. Nothing enforces that they

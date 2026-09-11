@@ -1,9 +1,9 @@
--- fr_metrics — fr_observations resolved, calibrated and labelled.
+-- metrics_1s — fr_observations resolved, calibrated and labelled.
 --
 -- STATIC. Written against the 95 columns fr_observations had on 2026-09-11 —
 -- every column named below exists there. Runs with nothing but psql:
 --
---     psql "$DSN" -f sql/fr_metrics.sql
+--     psql "$DSN" -f sql/metrics_1s.sql
 --
 -- If a column is missing the CREATE fails naming it ("column o.<name> does not
 -- exist"). Delete it from its COALESCE and run again; `\d fr_observations`
@@ -17,7 +17,7 @@
 --
 --   fr_observations   nmea2s3-update-pg --table fr_observations. 1 s buckets,
 --                     one column per decoded field, every instrument kept.
---   fr_metrics        this. One column per quantity, man_bsp_adj as of ts,
+--   metrics_1s        this. One column per quantity, man_bsp_adj as of ts,
 --                     sessions and legs LEFT joined.
 --   ra_*              race-annotate's labels and calibrations, read-only here.
 
@@ -25,7 +25,7 @@
 -- against a view that was never created.
 \set ON_ERROR_STOP on
 
-CREATE OR REPLACE VIEW public.fr_metrics AS
+CREATE OR REPLACE VIEW public.metrics_1s AS
 SELECT
     r.*,
 
@@ -156,9 +156,9 @@ LEFT JOIN public.ra_segments g
       AND r.ts >= g.t_start
       AND r.ts <  g.t_end;           -- half-open: adjacent legs share an instant
 
-COMMENT ON VIEW public.fr_metrics IS
+COMMENT ON VIEW public.metrics_1s IS
   'fr_observations with instrument chains resolved, man_bsp_adj as of ts, and '
-  'session/leg labels LEFT joined. Defined in sql/fr_metrics.sql. '
+  'session/leg labels LEFT joined. Defined in sql/metrics_1s.sql. '
   'ALWAYS constrain ts: unfiltered, the planner cannot estimate the range joins.';
 
 -- EVERY query against this view must constrain ts. Measured on the previous
@@ -174,8 +174,8 @@ DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ro_user') THEN
     EXECUTE 'GRANT USAGE ON SCHEMA public TO ro_user';
-    EXECUTE 'GRANT SELECT ON public.fr_metrics TO ro_user';
+    EXECUTE 'GRANT SELECT ON public.metrics_1s TO ro_user';
   ELSE
-    RAISE NOTICE 'role ro_user does not exist; skipping the grant on public.fr_metrics';
+    RAISE NOTICE 'role ro_user does not exist; skipping the grant on public.metrics_1s';
   END IF;
 END $$;

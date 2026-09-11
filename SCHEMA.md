@@ -205,7 +205,7 @@ the start audit entry identify which clock basis a run was stamped against,
 and the traffic itself carries an independent UTC reference: N2K PGNs 129029
 GNSS Position Data and 126992 System Time, and 0183 RMC, all report a GPS
 clock. `nmea2s3-update-pg` stores each as an ordinary reading in POSIX
-seconds, and `sql/fr_metrics.sql` resolves them into one `gps_time` beside `ts`.
+seconds, and `sql/metrics_1s.sql` resolves them into one `gps_time` beside `ts`.
 
 Stored raw rather than as the difference, for the same reason `mono` is: a
 difference is a verdict, and `extract(epoch FROM ts) - gps_time` recovers it
