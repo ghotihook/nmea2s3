@@ -44,10 +44,10 @@ the rest, or document that this path can duplicate.
 
 ## P1 — correct data, misleading answers
 
-### 4. `sql/metrics.sql` assumes the table is in `public`
+### 4. `sql/fr_metrics.sql` assumes the table is in `public`
 
-`sql/metrics.sql:161` `GRANT USAGE ON SCHEMA public` and an unqualified
-`FROM observations` (`:137`), while
+`sql/fr_metrics.sql:179` `GRANT USAGE ON SCHEMA public` and a hard-coded
+`FROM public.fr_observations` (`:110`), while
 `nmea2s3-update-pg` writes to wherever `search_path` resolves — which nothing
 in the repo pins. The last remaining schema assumption after `353fc0e` fixed
 the same class of bug in `table.ensure()`.
@@ -76,7 +76,7 @@ template: skip the key, do not end the listing.
 
 ### 8. `sql/` is unreachable after the documented install
 
-`README.md:265` says `psql "$PG" -f sql/metrics.sql`, but the Configure
+`README.md:265` says `psql "$PG" -f sql/fr_metrics.sql`, but the Configure
 section correctly notes "pipx installs the commands, not the repo" and gives
 `curl` lines for `env.example` and the unit file only. `sql/` is also missing
 from `[tool.hatch.build.targets.sdist].include` (`pyproject.toml:69`), which
@@ -85,7 +85,7 @@ include.
 
 ### 9. Two names for the connection string, neither defined
 
-`README.md:265` uses `$PG`; `sql/metrics.sql:19` uses `$DATABASE_URL`.
+`README.md:265` uses `$PG`; `sql/fr_metrics.sql:6` uses `$DSN`.
 `env.example` defines neither — it exposes five discrete `NMEA2S3_PG_*` vars,
 which `psql` does not read. Pick one and show how to build it.
 

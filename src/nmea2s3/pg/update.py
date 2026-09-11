@@ -12,14 +12,14 @@ seen.
            2026-08-24 12:00:00 |    6.41 |                 -34.20 |           -33.90
 
 `observations` is what the instruments SAID: every field, every device, no
-judgement. It is not the table to query day to day — sql/metrics.sql builds
-`metrics_1s` on top of it, which is what the instrument chains resolve to
-and what a dashboard should read.
+judgement. It is not the table to query day to day — a view over it resolves
+the instrument chains, and that is what a dashboard should read.
+sql/fr_metrics.sql is one, written for a table ingested with `--table
+fr_observations`.
 
 The bucket and the table name move independently. Nothing enforces that they
 agree, so a non-default bucket wants a table saying so (`--bucket 5m --table
-observations_5m`) — otherwise the `metrics_1s` view above it is named for a
-grain it no longer has.
+observations_5m`) rather than a name that implies the default.
 
 COLUMNS ARE `proto_field`, ONE PER DECODED FIELD
 ------------------------------------------------

@@ -184,7 +184,7 @@ def decode_sentence(sentence_type: str, raw: str, ts=None) -> list[tuple[str, fl
         if gps is not None:
             # The GPS clock itself, POSIX seconds, as an ordinary reading —
             # the same shape wire_n2k emits from 129029/126992, so the two
-            # protocols COALESCE into one `gps_time` in sql/metrics.sql.
+            # protocols COALESCE into one `gps_time` in sql/fr_metrics.sql.
             # Stored raw and compared in SQL: which disagreement is
             # tolerable is a question about your boat, not about capture.
             out.append(("rmc_gps_time", round(gps.timestamp(), 6)))

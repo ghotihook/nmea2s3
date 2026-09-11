@@ -262,7 +262,7 @@ nmea2s3-update-pg                                     # 1 s buckets into `observ
 nmea2s3-update-pg --bucket 5m --table observations_5m # any bucket: 250ms, 1s, 5m, 1h
 nmea2s3-update-pg --proto n2k --since 2026-08-01
 nmea2s3-update-pg --dry-run -v                        # decode and report, write nothing
-psql "$PG" -f sql/metrics.sql                        # the views you actually query
+psql "$PG" -f sql/fr_metrics.sql                      # the view you actually query
 ```
 
 ```
@@ -313,19 +313,20 @@ SQL, where you can say which columns are bearings.
 capture time — `CLOCK_REALTIME`, only as good as the logger's own clock was.
 Both protocols carry an independent UTC reference (N2K PGNs 129029 and
 126992, and 0183 RMC), and all of them resolve to one `gps_time` in
-`metrics_1s`. Nothing compares the two for you, because how far apart is too
+`fr_metrics`. Nothing compares the two for you, because how far apart is too
 far is a question about what you are asking:
 
 ```sql
-SELECT * FROM metrics_1s
- WHERE gps_time IS NOT NULL
+SELECT * FROM fr_metrics
+ WHERE ts >= '2026-08-24' AND ts < '2026-08-25'
+   AND gps_time IS NOT NULL
    AND abs(extract(epoch FROM ts) - gps_time) < 2;
 ```
 
 A small *positive* offset is normal — the frame is stamped on receipt, one
-transmission time after the fix it reports. `gps_time IS NULL` means no GPS
+transmission time after the fix it reports: 167 ms for an 80-character 0183
+sentence at 4800 baud, negligible on N2K. `gps_time IS NULL` means no GPS
 reported into that bucket, which is not the same finding as a disagreement.
-The foot of `sql/metrics.sql` has both queries and the reasoning.
 
 Ingest is **exactly-once by object**: keys are content-addressed, so a
 ledger table of consumed keys makes it safe to run on a cron over an
@@ -337,9 +338,8 @@ upsert keyed on `ts`.
 > PGN 130312's was, and 130316, 130310 and the set point held Kelvin under
 > column names that say nothing about the unit. Rebuilding part of a range
 > leaves those columns holding 293.15 for old rows and 20.0 for new ones with
-> nothing in the data to tell them apart — and `metrics_1s.temp_sea` now
-> prefers 130316, so an un-rebuilt bucket reads *worse* than before, not just
-> differently. Any conversion added to `wire_n2k.CONVERSIONS` has the same
+> nothing in the data to tell them apart, and any view that COALESCEs those
+> columns passes the mixture straight through. Any conversion added to `wire_n2k.CONVERSIONS` has the same
 > property. Rebuild everything, once, or drop the table and start it again.
 
 ### Two layers, and the names say which is which
@@ -348,25 +348,60 @@ upsert keyed on `ts`.
 |---|---|---|
 | `observations` | table | one column per decoded field, every instrument kept — what was **reported** |
 | `observations_objects` | table | the ledger of ingested keys |
-| **`metrics_1s`** | view | instruments resolved into named quantities — what you **query** |
+| **`fr_metrics`** | view | instruments resolved into named quantities, calibrated and labelled — what you **query** |
 
-The tables are written by `nmea2s3-update-pg`; the view comes from
-`sql/metrics.sql`, which is an example to adapt — it names fields your
-archive may not carry, so delete the chain entries you do not have. It also
-grants `SELECT` on the view to `ro_user`, and on nothing else: a view runs
-its query as its owner, so a dashboard reads the resolved layer without any
-privilege on the raw per-instrument table.
+The tables are written by `nmea2s3-update-pg` — `--table` names the first
+and the ledger follows it as `<table>_objects`. The view comes from
+`sql/fr_metrics.sql`, which is one boat's and an example to adapt. It reads a
+table ingested with `--table fr_observations`, names only the fields that
+boat's archive carries, and joins race-annotate's `ra_calibrations`,
+`ra_sessions` and `ra_segments` for the log calibration factor
+`man_bsp_adj` (1.0 where none is recorded), session and leg labels, and
+modelled `corrected_stw` and `leeway`. Point it at your table, delete the
+chain entries you do not have — a missing one fails the script naming the
+column — and drop the joins you have no tables for. It also grants `SELECT`
+on the view to `ro_user` if that role exists, and on nothing else: a view
+runs its query as its owner, so a dashboard reads the resolved layer without
+any privilege on the raw per-instrument table.
 
-`metrics_1s` resolves the instrument chains with `COALESCE`: the first
+**Constrain `ts` on every query against it.** The calibration, session and
+leg joins are range joins the planner cannot estimate unfiltered: with no
+`ts` predicate, one afternoon's query scanned all 3.6M rows in 8.6 s, and a
+literal `ts` window returned the same rows in 0.3 s. Grafana's
+`$__timeFilter` does it for you; ad-hoc queries are the exposure.
+
+`fr_metrics` resolves the instrument chains with `COALESCE`: the first
 instrument that reported a bucket wins and contributes its own value, never
 an average across a chain — two instruments differing by a known offset must
 not be blended into a number neither of them measured.
 
 **If you resample coarser, angles need a circular mean.** The arithmetic mean
 of 359° and 1° is 180°, a heading pointing exactly backwards, produced
-silently from two readings two degrees apart. `sql/metrics.sql` ends with the
-recipe, verified against PostgreSQL 14 — that case returns 0° where `avg()`
-returns 180°.
+silently from two readings two degrees apart. The mean of an angle is the
+direction of the summed unit vectors — for bearings (`cog`, `hdg`, `twd`,
+`bus_set`) wrapped to [0, 360), for angles off the bow (`awa`, `twa`) left
+signed. Everything else, including small angles like `heel` and `leeway`
+that never approach the wrap, takes a plain `avg()`:
+
+```sql
+SELECT date_trunc('minute', ts) AS minute,
+       mod(round(degrees(atan2(avg(sin(radians(cog))),
+                               avg(cos(radians(cog)))))::numeric, 6) + 360, 360) AS cog,
+       round(degrees(atan2(avg(sin(radians(awa))),
+                           avg(cos(radians(awa)))))::numeric, 6) AS awa,
+       avg(sog) AS sog, avg(heel) AS heel
+  FROM fr_metrics
+ WHERE ts >= '2026-08-24' AND ts < '2026-08-25'
+ GROUP BY 1;
+```
+
+Verified against PostgreSQL 14: 359° and 1° give 0° where `avg()` gives
+180°. The `round()` is not cosmetic — readings that cancel exactly leave
+`atan2` a sine term of about -2e-17, which the wrap would otherwise turn into
+359.99999…. And a mean says nothing about scatter:
+`sqrt(avg(sin(radians(cog)))^2 + avg(cos(radians(cog)))^2)` is 1.0 for
+perfect agreement and near 0 for noise; treat a mean bearing below ~0.7 as
+not meaning much.
 
 ## The parts worth knowing
 
