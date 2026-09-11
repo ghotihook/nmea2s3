@@ -356,7 +356,8 @@ and the ledger follows it as `<table>_objects`. The view comes from
 table ingested with `--table fr_observations`, names only the fields that
 boat's archive carries, and joins race-annotate's `ra_calibrations`,
 `ra_sessions` and `ra_segments` for the log calibration factor
-`man_bsp_adj` (1.0 where none is recorded), session and leg labels, and
+`man_bsp_adj` (taken as 1.0 in `adj_stw` where none is recorded), session
+and leg labels, and
 modelled `corrected_stw` and `leeway`. Point it at your table, delete the
 chain entries you do not have — a missing one fails the script naming the
 column — and drop the joins you have no tables for. It also grants `SELECT`

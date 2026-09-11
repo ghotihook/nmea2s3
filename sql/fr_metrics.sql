@@ -31,10 +31,10 @@ SELECT
 
     -- ── calibration ─────────────────────────────────────────────────────────
     -- The man_bsp_adj row in force at ts: the newest effective_from <= ts.
-    -- Before the first row the factor is 1.0, so adj_stw is the raw log
-    -- rather than NULL. cal_id and cal_effective_from stay NULL there: test
-    -- those, not man_bsp_adj, for whether a calibration was recorded.
-    a.man_bsp_adj,
+    -- man_bsp_adj is that lookup as recorded, NULL before the first row.
+    -- adj_stw takes a missing factor as 1.0, so it is the raw log there
+    -- rather than NULL.
+    c.param_value              AS man_bsp_adj,
     c.effective_from           AS cal_effective_from,  -- group by this for an epoch
     c.cal_id,                                          -- back to ra_calibrations.notes
     a.adj_stw,
@@ -124,12 +124,9 @@ LEFT JOIN (
        ON r.ts >= c.effective_from
       AND (c.effective_to IS NULL OR r.ts < c.effective_to)
 
--- The factor in force, 1.0 when no calibration row covers ts, and adj_stw
--- from it — once, so corrected_stw below cannot drift from adj_stw.
+-- adj_stw once, so corrected_stw below cannot drift from it.
 CROSS JOIN LATERAL (
-    SELECT f.man_bsp_adj,
-           r.stw * f.man_bsp_adj AS adj_stw
-      FROM (SELECT COALESCE(c.param_value, 1.0) AS man_bsp_adj) f
+    SELECT r.stw * COALESCE(c.param_value, 1.0) AS adj_stw
 ) a
 
 -- corrected_stw once, so leeway can divide by it without restating the
