@@ -31,13 +31,13 @@ SELECT
 
     -- ── calibration ─────────────────────────────────────────────────────────
     -- The man_bsp_adj row in force at ts: the newest effective_from <= ts.
-    -- NULL before the first row, and adj_stw with it — a missing factor is
-    -- not 1.0, and defaulting to 1.0 would invent a calibration nobody
-    -- recorded.
-    c.param_value              AS man_bsp_adj,
+    -- Before the first row the factor is 1.0, so adj_stw is the raw log
+    -- rather than NULL. cal_id and cal_effective_from stay NULL there: test
+    -- those, not man_bsp_adj, for whether a calibration was recorded.
+    a.man_bsp_adj,
     c.effective_from           AS cal_effective_from,  -- group by this for an epoch
     c.cal_id,                                          -- back to ra_calibrations.notes
-    r.stw * c.param_value      AS adj_stw,
+    a.adj_stw,
 
     -- ── labels ──────────────────────────────────────────────────────────────
     s.session_id,
@@ -53,8 +53,13 @@ SELECT
     -- Appended, not placed beside adj_stw: CREATE OR REPLACE VIEW can only add
     -- columns at the end, and fails on an existing view otherwise.
     k.corrected_stw,
-    -- heel in degrees, so leeway in degrees and carrying heel's sign
-    6.953846 * r.heel / k.corrected_stw ^ 2 AS leeway
+    -- heel in degrees, so leeway in degrees and carrying heel's sign. Speed
+    -- floored at 1 kn and the result capped at 15 degrees, so a heeled boat
+    -- at a standstill cannot produce a leeway of hundreds of degrees. The
+    -- 0 * term is not a no-op: GREATEST skips NULLs, so without it a second
+    -- with heel but no stw would get a leeway computed at the 1 kn floor.
+    sign(r.heel) * LEAST(9.2 * abs(r.heel) / (GREATEST(k.corrected_stw, 1.0) ^ 2), 15)
+        + 0 * k.corrected_stw AS leeway
 
 FROM (
     SELECT
@@ -119,14 +124,29 @@ LEFT JOIN (
        ON r.ts >= c.effective_from
       AND (c.effective_to IS NULL OR r.ts < c.effective_to)
 
--- corrected_stw once, so leeway can divide by it without restating the
--- polynomial. Unlike adj_stw, a missing man_bsp_adj is taken as 1.0 here:
--- the fit is applied to the uncalibrated log rather than dropped. At or near
--- zero boat speed the leeway model divides heel by ~0.55 and means nothing.
+-- The factor in force, 1.0 when no calibration row covers ts, and adj_stw
+-- from it — once, so corrected_stw below cannot drift from adj_stw.
 CROSS JOIN LATERAL (
-    SELECT 0.740564
-         + a.s * (0.859710 + 0.048251 * (a.s - 6.0) / 3.0) AS corrected_stw
-      FROM (SELECT r.stw * COALESCE(c.param_value, 1.0) AS s) a
+    SELECT f.man_bsp_adj,
+           r.stw * f.man_bsp_adj AS adj_stw
+      FROM (SELECT COALESCE(c.param_value, 1.0) AS man_bsp_adj) f
+) a
+
+-- corrected_stw once, so leeway can divide by it without restating the
+-- model. |adj_stw|, plus a low-speed boost that dies away by ~6 kn, minus a
+-- heel term (heel capped at 30 degrees, none when heel is missing).
+--
+-- The LEAST(..., 700) inside each exp() changes no value. Postgres raises
+-- "value out of range" rather than returning 0 or Infinity, so without it
+-- one garbage stw above ~355 kn in the ts window would fail the whole query;
+-- by that argument every exp() term has already stopped contributing.
+CROSS JOIN LATERAL (
+    SELECT x.v
+         + 1.9366 * (1 - exp(-LEAST(x.v / 0.5, 700))) / (1 + exp(LEAST(x.v / 1.5709, 700)))
+         - 0.1849 * (LEAST(abs(COALESCE(r.heel, 0)), 30) / 20.0) ^ 2
+                  * (1 - exp(-LEAST(x.v / 1.0, 700)))
+           AS corrected_stw
+      FROM (SELECT abs(a.adj_stw) AS v) x
 ) k
 
 -- LEFT, both of them. Telemetry inside a session but outside any leg — the
