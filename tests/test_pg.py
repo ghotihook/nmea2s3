@@ -252,6 +252,22 @@ def test_an_impossible_value_never_reaches_a_bucket():
     assert b.dropped_out_of_range == 1
 
 
+def test_raw_xdr_counts_are_not_mistaken_for_impossible_values():
+    """RAW_WIND_S and RAW_WIND_A are the B&G sensors' raw counts, not knots or
+    degrees. A knots bound on xdr_raw_wind_s once kept only its zero readings,
+    so a year of the column read 0.0. The first two are archived sentences
+    verbatim, units as they claim; the third is fastnet2ip's current form."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n0183", "$IIXDR,U,1808.00,N,RAW_WIND_S*79"))
+    b.add(_rec(T0, "n0183", "$IIXDR,A,16155.0,D,RAW_WIND_A*72"))
+    b.add(_rec(T0 + timedelta(seconds=1), "n0183", _nmea("IIXDR,G,812.00,,RAW_WIND_S")))
+    assert b.dropped_out_of_range == 0, "a raw count must not fail a range guard"
+    first, second = b.rows()
+    assert first["xdr_raw_wind_s"] == 1808.0
+    assert first["xdr_raw_wind_a"] == 16155.0
+    assert second["xdr_raw_wind_s"] == 812.0
+
+
 def test_a_corrupt_sentence_contributes_nothing():
     """pynmea2 validates a checksum whenever one is present, so corruption
     on the wire never reaches a column. The archive still holds the raw

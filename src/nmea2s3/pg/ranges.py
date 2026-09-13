@@ -71,7 +71,11 @@ RANGES: dict[str, tuple[float, float]] = {
     "mwv_wind_speed_r": (0.0, 100.0), "mwv_wind_speed_t": (0.0, 100.0),
     "n2k_windspeed_apparent": (0.0, 100.0),
     "n2k_windspeed_true_boat_referenced": (0.0, 100.0),
-    "xdr_raw_wind_s": (0.0, 100.0),
+    # The XDR RAW_* transducers (RAW_WIND_S, RAW_WIND_A, RAW_BSP) are absent on
+    # purpose: they are the B&G sensors' raw counts, not knots or degrees,
+    # whatever their XDR unit field claims. RAW_WIND_S runs to ~4400 and
+    # RAW_WIND_A is a signed 16-bit count. Found 2026-09-13: a knots bound on
+    # xdr_raw_wind_s kept only its zero readings, so every stored value was 0.0.
 }
 
 
