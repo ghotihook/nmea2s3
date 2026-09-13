@@ -58,8 +58,10 @@ SELECT
     -- at a standstill cannot produce a leeway of hundreds of degrees. The
     -- 0 * term is not a no-op: GREATEST skips NULLs, so without it a second
     -- with heel but no stw would get a leeway computed at the 1 kn floor.
+    -- BEGIN leeway — current production
     sign(r.heel) * LEAST(9.2 * abs(r.heel) / (GREATEST(k.corrected_stw, 1.0) ^ 2), 15)
         + 0 * k.corrected_stw AS leeway
+    -- END leeway
 
 FROM (
     SELECT
@@ -137,6 +139,12 @@ CROSS JOIN LATERAL (
 -- "value out of range" rather than returning 0 or Infinity, so without it
 -- one garbage stw above ~355 kn in the ts window would fail the whole query;
 -- by that argument every exp() term has already stopped contributing.
+--
+-- This block and the leeway column (BEGIN / END leeway, above) are the stw /
+-- leeway calibration. `python -m stw_leeway` (boatcal repo) prints a
+-- replacement for each, markers included: swap each BEGIN ... END pair for its
+-- block and re-run this file.
+-- BEGIN corrected_stw — current production
 CROSS JOIN LATERAL (
     SELECT x.v
          + 1.9366 * (1 - exp(-LEAST(x.v / 0.5, 700))) / (1 + exp(LEAST(x.v / 1.5709, 700)))
@@ -145,6 +153,7 @@ CROSS JOIN LATERAL (
            AS corrected_stw
       FROM (SELECT abs(a.adj_stw) AS v) x
 ) k
+-- END corrected_stw
 
 -- LEFT, both of them. Telemetry inside a session but outside any leg — the
 -- pre-start, the gaps between legs, the sail home — is kept with leg_no NULL.
