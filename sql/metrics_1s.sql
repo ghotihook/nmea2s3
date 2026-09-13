@@ -58,10 +58,11 @@ SELECT
     -- at a standstill cannot produce a leeway of hundreds of degrees. The
     -- 0 * term is not a no-op: GREATEST skips NULLs, so without it a second
     -- with heel but no stw would get a leeway computed at the 1 kn floor.
-    -- BEGIN leeway — current production
-    sign(r.heel) * LEAST(9.2 * abs(r.heel) / (GREATEST(k.corrected_stw, 1.0) ^ 2), 15)
+    -- BEGIN leeway — stw_leeway proposed_production, 2026-09-13
+    sign(r.heel) * LEAST(8.080 * abs(r.heel) / (GREATEST(k.corrected_stw, 1.0) ^ 2), 15)
         + 0 * k.corrected_stw AS leeway
     -- END leeway
+
 
 FROM (
     SELECT
@@ -144,16 +145,19 @@ CROSS JOIN LATERAL (
 -- leeway calibration. `python -m stw_leeway` (boatcal repo) prints a
 -- replacement for each, markers included: swap each BEGIN ... END pair for its
 -- block and re-run this file.
--- BEGIN corrected_stw — current production
+-- BEGIN corrected_stw — stw_leeway proposed_production, 2026-09-13
 CROSS JOIN LATERAL (
     SELECT x.v
-         + 1.9366 * (1 - exp(-LEAST(x.v / 0.5, 700))) / (1 + exp(LEAST(x.v / 1.5709, 700)))
-         - 0.1849 * (LEAST(abs(COALESCE(r.heel, 0)), 30) / 20.0) ^ 2
+         + 2.2162 * (1 - exp(-LEAST(x.v / 0.5000, 700))) / (1 + exp(LEAST(x.v / 1.2698, 700)))
+         - CASE WHEN r.heel < 0 THEN 0.1294 ELSE 0.1166 END
+                  * (LEAST(abs(COALESCE(r.heel, 0)), 30) / 20.0) ^ 2
                   * (1 - exp(-LEAST(x.v / 1.0, 700)))
            AS corrected_stw
       FROM (SELECT abs(a.adj_stw) AS v) x
 ) k
 -- END corrected_stw
+
+
 
 -- LEFT, both of them. Telemetry inside a session but outside any leg — the
 -- pre-start, the gaps between legs, the sail home — is kept with leg_no NULL.
