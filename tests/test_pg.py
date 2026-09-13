@@ -268,6 +268,33 @@ def test_raw_xdr_counts_are_not_mistaken_for_impossible_values():
     assert second["xdr_raw_wind_s"] == 812.0
 
 
+def test_a_position_is_both_halves_or_neither():
+    """RMC and GLL latitude and longitude are one fix, kept together or not at
+    all. pynmea2's own properties return 0.0 for an empty field or a
+    hemisphere they do not know — a real-looking fix off West Africa that no
+    range check can refuse — and a guard applied field by field kept the
+    longitude of a fix whose latitude it had rightly thrown away. Archived
+    sentences are verbatim."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    b.add(_rec(T0, "n0183", "$GPGLL,3351.059,S,15113.580,E,004056.00,A*1C"))
+    b.add(_rec(T0, "n0183", "$MFRMC,002824,A,3351.331,S,15113.777,E,6.30,326.4,310824,12.8,E,A*12"))
+    bad = ["$GPGLL,33500.670,N,15115.807,E,053656.00,A*3D",        # archived: 335 N
+           "$MFRMC,004536,A,11851.549,S,15115.108,E,4.52,6.1,120725,12.8,E,A*2E",
+           _nmea("GPGLL,,,,,004056.00,A"),                        # no fix, flagged valid
+           _nmea("GPGLL,3351.059,s,15113.580,e,004056.00,A"),     # hemisphere pynmea2 zeroes
+           _nmea("GPGLL,3375.000,S,15113.580,E,004056.00,A")]     # 75 minutes
+    for i, raw in enumerate(bad, 1):
+        b.add(_rec(T0 + timedelta(seconds=i), "n0183", raw))
+
+    first, *rest = b.rows()
+    assert abs(first["gll_latitude"] - -(33 + 51.059 / 60)) < 1e-9
+    assert abs(first["gll_longitude"] - (151 + 13.580 / 60)) < 1e-9
+    assert abs(first["rmc_latitude"] - -(33 + 51.331 / 60)) < 1e-9
+    assert abs(first["rmc_longitude"] - (151 + 13.777 / 60)) < 1e-9
+    for row in rest:
+        assert not [f for f in row if f.endswith("itude")], f"half a fix, or 0.0: {row}"
+
+
 def test_a_corrupt_sentence_contributes_nothing():
     """pynmea2 validates a checksum whenever one is present, so corruption
     on the wire never reaches a column. The archive still holds the raw

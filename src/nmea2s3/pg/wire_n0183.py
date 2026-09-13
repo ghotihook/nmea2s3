@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 
 import pynmea2
 
@@ -31,9 +32,7 @@ STATUS_SENTENCES = frozenset({"MWV", "RMC", "ROT", "GLL"})
 # The third element is None except for MWV, which is the only sentence carrying
 # two different measurements distinguished by a `reference` field.
 #
-# `latitude`/`longitude` are pynmea2's own computed properties — it combines the
-# raw ddmm.mmmm value with the N/S/E/W letter into signed decimal degrees. Using
-# them is wire-format decoding, not column policy.
+# RMC and GLL positions are not in this table — see POSITION_SENTENCES.
 SENTENCE_FIELDS: dict[str, list[tuple[str, str, dict | None]]] = {
     "MWV": [("wind_angle_r", "wind_angle", {"reference": "R"}),
             ("wind_angle_t", "wind_angle", {"reference": "T"}),
@@ -44,17 +43,26 @@ SENTENCE_FIELDS: dict[str, list[tuple[str, str, dict | None]]] = {
     "VTG": [("spd_over_grnd_kts", "spd_over_grnd_kts", None),
             ("true_track", "true_track", None)],
     "RMC": [("spd_over_grnd", "spd_over_grnd", None),
-            ("true_course", "true_course", None),
-            ("latitude", "latitude", None),
-            ("longitude", "longitude", None)],
+            ("true_course", "true_course", None)],
     "HDG": [("heading", "heading", None)],
     "HDM": [("heading", "heading", None)],
     "ROT": [("rate_of_turn", "rate_of_turn", None)],
     "RSA": [("rsa_starboard", "rsa_starboard", None)],
-    "GLL": [("latitude", "latitude", None), ("longitude", "longitude", None)],
+    "GLL": [],                                   # a position and nothing else
     "DBT": [("depth_meters", "depth_meters", None)],
     "MDA": [("water_temp", "water_temp", None)],
 }
+
+# RMC and GLL also carry a position, which _position() decodes from the raw
+# ddmm.mmm fields rather than through pynmea2's `latitude`/`longitude`. Those
+# return 0.0 for an empty field or a hemisphere letter they do not recognise —
+# a real-looking fix off West Africa that no range check can refuse. And the
+# two halves are one reading: both are kept or neither is, so a fix whose
+# latitude is impossible cannot leave its longitude behind in the column.
+POSITION_SENTENCES = frozenset({"RMC", "GLL"})
+
+# [d]ddmm.mmm — the minutes are always the last two whole digits.
+DDMM = re.compile(r"(\d+)(\d\d\.\d+)")
 
 # XDR packs several transducers into one sentence. Only these are kept, and the
 # match is CASE SENSITIVE on purpose: the archive holds far more 'Roll' than
@@ -90,6 +98,30 @@ def _fold_180(deg: float) -> float:
 
 def _field_name(sentence_type: str, suffix: str) -> str:
     return f"{sentence_type}_{suffix}".lower()
+
+
+def _degrees(ddmm, hemisphere, positive: str, negative: str, limit: float) -> float | None:
+    """ddmm.mmm and its hemisphere letter -> signed decimal degrees, or None
+    when the pair is not a position: malformed, 60 minutes or more, past the
+    pole or the antimeridian, or a letter other than the two it can be."""
+    match = DDMM.fullmatch(ddmm or "")
+    if not match or hemisphere not in (positive, negative):
+        return None
+    minutes = float(match.group(2))
+    degrees = float(match.group(1)) + minutes / 60.0
+    if minutes >= 60.0 or degrees > limit:
+        return None
+    return -degrees if hemisphere == negative else degrees
+
+
+def _position(sentence_type: str, msg) -> list[tuple[str, float]]:
+    """Latitude and longitude from one fix: both, or neither."""
+    lat = _degrees(getattr(msg, "lat", None), getattr(msg, "lat_dir", None), "N", "S", 90.0)
+    lon = _degrees(getattr(msg, "lon", None), getattr(msg, "lon_dir", None), "E", "W", 180.0)
+    if lat is None or lon is None:
+        return []
+    return [(_field_name(sentence_type, "latitude"), lat),
+            (_field_name(sentence_type, "longitude"), lon)]
 
 
 def _gps_datetime(msg):
@@ -144,7 +176,7 @@ def decode_sentence(sentence_type: str, raw: str, ts=None) -> list[tuple[str, fl
         return _decode_xdr(raw)
 
     fields = SENTENCE_FIELDS.get(sentence_type)
-    if not fields:
+    if fields is None:
         return []
 
     try:
@@ -178,6 +210,9 @@ def decode_sentence(sentence_type: str, raw: str, ts=None) -> list[tuple[str, fl
         if name in FOLD_TO_SIGNED:
             v = _fold_180(v)
         out.append((name, v * SCALE[name] if name in SCALE else v))
+
+    if sentence_type in POSITION_SENTENCES:
+        out += _position(sentence_type, msg)
 
     if sentence_type == "RMC":
         gps = _gps_datetime(msg)
