@@ -30,8 +30,8 @@ which is where the systemd unit expects them; without it they land in
 `~/.local/bin` and `ExecStart=` has to be pointed there instead.
 
 **`--force` on every install, upgrades included.** `pipx upgrade` compares
-version numbers, so new commits that did not bump `version` in
-`pyproject.toml` look like nothing to do — leaving you on old code believing
+version numbers, so new commits that did not bump `__version__` in
+`src/nmea2s3/__init__.py` look like nothing to do — leaving you on old code believing
 you upgraded, at the one thing that cannot be re-run. An upgrade replaces the
 venv underneath the running process, so follow it with
 `sudo systemctl restart nmea2s3`.
@@ -40,7 +40,7 @@ Pin a tag for anything you actually deploy, so `nmea2s3-logger --version` in
 the journal tells you truthfully what is running:
 
 ```bash
-sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git@v0.3.1
+sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git@v0.3.2
 ```
 
 Four commands land on your `PATH`:
