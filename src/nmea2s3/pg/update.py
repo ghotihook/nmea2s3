@@ -7,19 +7,18 @@ does not exist and gains a column whenever a field appears that it has never
 seen.
 
     raw/2026/08/24/120000-n2k-<cid>.ndjson.gz
-        -> observations
-           ts                  | n2k_sog | n2k_windangle_apparent | mwv_wind_angle_r
+        -> fr_observations
+           ts               | n2k_sog | n2k_windangle_apparent | mwv_wind_angle_r
            2026-08-24 12:00:00 |    6.41 |                 -34.20 |           -33.90
 
-`observations` is what the instruments SAID: every field, every device, no
+`fr_observations` is what the instruments SAID: every field, every device, no
 judgement. It is not the table to query day to day — a view over it resolves
 the instrument chains, and that is what a dashboard should read.
-sql/metrics_1s.sql is one, written for a table ingested with `--table
-fr_observations`.
+sql/metrics_1s.sql is one, written for the default table.
 
 The bucket and the table name move independently. Nothing enforces that they
 agree, so a non-default bucket wants a table saying so (`--bucket 5m --table
-observations_5m`) rather than a name that implies the default.
+fr_observations_5m`) rather than a name that implies the default.
 
 COLUMNS ARE `proto_field`, ONE PER DECODED FIELD
 ------------------------------------------------
@@ -89,7 +88,7 @@ from . import table as table_mod
 
 APPLICATION = "nmea2s3-update-pg"
 
-DEFAULT_TABLE = "observations"
+DEFAULT_TABLE = "fr_observations"
 DEFAULT_BUCKET = "1s"
 
 log = logging.getLogger("nmea2s3.pg")

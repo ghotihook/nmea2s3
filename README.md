@@ -258,8 +258,8 @@ output closed the pipe before the export finished.
 bucket, one column per decoded field:
 
 ```bash
-nmea2s3-update-pg                                     # 1 s buckets into `observations`
-nmea2s3-update-pg --bucket 5m --table observations_5m # any bucket: 250ms, 1s, 5m, 1h
+nmea2s3-update-pg                                        # 1 s buckets into `fr_observations`
+nmea2s3-update-pg --bucket 5m --table fr_observations_5m # any bucket: 250ms, 1s, 5m, 1h
 nmea2s3-update-pg --proto n2k --since 2026-08-01
 nmea2s3-update-pg --dry-run -v                        # decode and report, write nothing
 psql "$PG" -f sql/metrics_1s.sql                      # the view you actually query
@@ -346,14 +346,14 @@ upsert keyed on `ts`.
 
 | | | |
 |---|---|---|
-| `observations` | table | one column per decoded field, every instrument kept — what was **reported** |
-| `observations_objects` | table | the ledger of ingested keys |
+| `fr_observations` | table | one column per decoded field, every instrument kept — what was **reported** |
+| `fr_observations_objects` | table | the ledger of ingested keys |
 | **`metrics_1s`** | view | instruments resolved into named quantities, calibrated and labelled — what you **query** |
 
 The tables are written by `nmea2s3-update-pg` — `--table` names the first
 and the ledger follows it as `<table>_objects`. The view comes from
-`sql/metrics_1s.sql`, which is one boat's and an example to adapt. It reads a
-table ingested with `--table fr_observations`, names only the fields that
+`sql/metrics_1s.sql`, which is one boat's and an example to adapt. It reads
+the default table, `fr_observations`, names only the fields that
 boat's archive carries, and joins race-annotate's `ra_calibrations`,
 `ra_sessions` and `ra_segments` for the log calibration factor
 `man_bsp_adj` (taken as 1.0 in `adj_stw` where none is recorded), session
