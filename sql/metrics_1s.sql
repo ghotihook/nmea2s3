@@ -1,15 +1,15 @@
 -- metrics_1s — fr_observations resolved, calibrated and labelled.
 --
--- STATIC. Written against the 95 columns fr_observations had on 2026-09-11,
--- plus the three n2k_bandg_raw_* columns. Runs with nothing but psql:
+-- STATIC. Written against the columns fr_observations had on 2026-09-14 —
+-- every column named below exists there. Runs with nothing but psql:
 --
 --     psql "$DSN" -f sql/metrics_1s.sql
 --
 -- If a column is missing the CREATE fails naming it ("column o.<name> does not
 -- exist"). Delete it from its COALESCE and run again; `\d fr_observations`
--- shows what the table has. The n2k_bandg_raw_* columns are the likely ones:
--- they appear only once nmea2s3-update-pg 0.3.4 or later has loaded a PGN
--- 130824 frame, and until then the *_raw columns come from XDR alone.
+-- shows what the table has. The n2k_bandg_raw_* columns are the likely ones
+-- elsewhere: each appears only once nmea2s3-update-pg 0.3.4 or later has
+-- loaded a PGN 130824 frame carrying that channel.
 --
 -- CREATE OR REPLACE keeps the view's grants, but can only add columns at the
 -- end, never move or rename one. A view created before 2026-09-14 has the
@@ -75,10 +75,11 @@ SELECT
 FROM (
     SELECT
         o.ts,
-        -- *_raw: the B&G sensors' counts before the H2000 calibrates them, not
-        -- knots or degrees; awa_raw is a signed 16-bit count, not an angle.
-        -- PGN 130824 first, then XDR RAW_*: fastnet2n2k and fastnet2ip send
-        -- 130824, fastnet2ip also XDR, both from the same pyfastnet values.
+        -- *_raw: the B&G sensors' signed 16-bit counts before the H2000
+        -- calibrates them, none of them knots or degrees; awa_raw is not an
+        -- angle. fastnet2n2k and fastnet2ip send them as PGN 130824, and
+        -- fastnet2ip also as XDR RAW_* (no heading), from the same pyfastnet
+        -- values, so 130824 goes first wherever the table has both.
         COALESCE(o.n2k_windangle_apparent, o.mwv_wind_angle_r) AS awa,
         COALESCE(o.n2k_bandg_raw_wind_a, o.xdr_raw_wind_a) AS awa_raw,
         COALESCE(o.n2k_windspeed_apparent, o.mwv_wind_speed_r) AS aws,
@@ -89,7 +90,10 @@ FROM (
         -- the speed that goes with twd: true wind over the GROUND, not the boat
         o.n2k_windspeed_magnetic_ground_referenced_to_magnetic_north AS tws_ground,
         COALESCE(o.n2k_speedwaterreferenced, o.vhw_water_speed_knots) AS stw,
-        COALESCE(o.n2k_bandg_raw_bsp, o.xdr_raw_bsp) AS stw_raw,
+        -- no n2k_bandg_raw_bsp column yet: no 130824 frame has carried raw
+        -- boatspeed. Once one has, make this COALESCE(o.n2k_bandg_raw_bsp,
+        -- o.xdr_raw_bsp) — same name and type, so a plain re-run.
+        o.xdr_raw_bsp AS stw_raw,
         -- PGN 128275, METRES. Log distance against GPS distance over a leg is
         -- a calibration check that does not depend on 1 s speed noise.
         o.n2k_log AS log_total,
@@ -97,6 +101,7 @@ FROM (
         COALESCE(o.n2k_sog, o.rmc_spd_over_grnd, o.vtg_spd_over_grnd_kts) AS sog,
         COALESCE(o.n2k_cog, o.rmc_true_course, o.vtg_true_track) AS cog,
         COALESCE(o.n2k_heading_magnetic, o.hdg_heading, o.hdm_heading) AS hdg,
+        o.n2k_bandg_raw_heading AS hdg_raw,
         COALESCE(o.n2k_roll, o.xdr_roll, o.xdr_m5_heel) AS heel,
         COALESCE(o.n2k_pitch, o.xdr_pitch, o.xdr_m5_pitch) AS pitch,
         COALESCE(o.n2k_rate, o.rot_rate_of_turn) AS rot,
