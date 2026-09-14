@@ -36,12 +36,9 @@ you upgraded, at the one thing that cannot be re-run. An upgrade replaces the
 venv underneath the running process, so follow it with
 `sudo systemctl restart nmea2s3`.
 
-Pin a tag for anything you actually deploy, so `nmea2s3-logger --version` in
-the journal tells you truthfully what is running:
-
-```bash
-sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git@v0.3.3
-```
+The line above installs the latest version. Every change that reaches a
+command bumps it, so `nmea2s3-logger --version` in the journal says what is
+running; each version is also a tag, `v<version>`, to install by name.
 
 Four commands land on your `PATH`:
 

@@ -12,8 +12,6 @@ change whenever what an installed command does changes.
   - patch (`0.3.1` -> `0.3.2`) by default; minor or major only when asked
   - the bump as its own commit, titled `<version>, <why>`
   - an annotated tag `v<version>` on that commit, message `v<version> — <summary>`
-  - the pinned install line in `README.md` (`…/nmea2s3.git@v<version>`) moved
-    to the new tag in the same commit
   - `main` and the tag pushed together: `git push origin main v<version>`
 - Several fixes going out together share one bump, made after the last of them.
 - No bump for changes nothing installs: `tests/`, `sql/`, docs, `TODO.md`.
