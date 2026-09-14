@@ -52,6 +52,19 @@ spool upload is simply a new key appearing, picked up on the next pass.
 `--rebuild` ignores the ledger and reprocesses everything in range. It is
 safe because every write is an upsert keyed on ts.
 
+A RUN THAT CANNOT GO ON STOPS, IT DOES NOT CRASH
+------------------------------------------------
+Each object is committed and in the ledger before the next is fetched, so
+wherever a run stops, the next one resumes from there. A connection lost
+under an object is replaced once and the object written again (session.py
+says how, and why only once). Lost again, or Postgres or S3 failing in a way
+a later run might not, the run says where it stopped and exits 75
+(EX_TEMPFAIL): try again later. A bug still ends in a traceback.
+
+One run per table. A second finds the table's lock held, says by whom, and
+exits 0 — under a once-a-minute cron that is the normal answer while a long
+run is still going.
+
 THE DATABASE IS DERIVED AND DISPOSABLE
 --------------------------------------
 Everything here can be regenerated from the archive, which is why the table
@@ -78,10 +91,13 @@ import os
 import sys
 from datetime import date, datetime, timezone
 
+from botocore.exceptions import BotoCoreError, ClientError
+
 from .. import __version__
 from ..audit_log import log_action_safely
 from ..ndjson import (iter_keys, iter_rows_ndjson_gz, key_date,
                       make_s3_client, required_env)
+from ..retry import _is_retryable
 
 from . import bucket as bucket_mod
 from . import table as table_mod
@@ -90,6 +106,8 @@ APPLICATION = "nmea2s3-update-pg"
 
 DEFAULT_TABLE = "fr_observations"
 DEFAULT_BUCKET = "1s"
+
+EX_TEMPFAIL = 75    # sysexits.h: failed for now, try again later
 
 log = logging.getLogger("nmea2s3.pg")
 
@@ -163,10 +181,29 @@ def ingest_object(s3, s3_bucket: str, key: str, buckets) -> int:
     return count
 
 
+def write_object(con, args, key: str, buckets, rows: list, new_columns: list) -> int:
+    """One object's rows, then its ledger entry. Returns the rows written.
+
+    Safe to run twice, which is what lets Session.call retry it: the rows
+    are upserts and the ledger insert does nothing the second time.
+
+    Columns it adds go straight into `new_columns` rather than being
+    returned, so a first attempt that altered the table before its
+    connection died still has them reported — the retry finds them present
+    and adds none.
+    """
+    new_columns.extend(table_mod.ensure(con, args.table, buckets.fields()))
+    written = table_mod.write(con, args.table, rows)
+    record_key(con, args.ledger, key, rows)
+    return written
+
+
 def run(args, config) -> int:
     # Imported here rather than at module scope only so that --help and
     # --version do not pay for a database driver.
     import psycopg
+
+    from . import session as session_mod
 
     bucket_size = bucket_mod.parse_interval(args.bucket)
     since = args.since or date.min
@@ -174,14 +211,66 @@ def run(args, config) -> int:
 
     s3 = make_s3_client(config["s3_endpoint_url"], config["s3_region"],
                         config["s3_access_key_id"], config["s3_secret_access_key"])
-    con = psycopg.connect(
-        host=config["pg_host"], port=config["pg_port"], dbname=config["pg_dbname"],
-        user=config["pg_user"], password=config["pg_password"],
-        connect_timeout=10, autocommit=True)
 
+    total_rows = total_objects = total_dropped = 0
+    new_columns: list[str] = []
+    key = None
+
+    def summary() -> str:
+        text = (f"{total_objects} object(s), {total_rows} row(s) into "
+                f"{args.table} at {args.bucket}")
+        if total_dropped:
+            text += f", {total_dropped} sample(s) dropped out of range"
+        if new_columns:
+            text += f", {len(new_columns)} new column(s): {', '.join(new_columns)}"
+        return text
+
+    def audit(exit_code: int, stopped_at: str | None = None) -> None:
+        # Only runs that did something no later reader could reconstruct.
+        #
+        # WHICH objects were ingested, and how many rows each produced, is
+        # already in the ledger table — per object, by write_object. An entry
+        # per incremental run duplicates that into a bucket whose credentials
+        # cannot delete: the logger lands a new object every FLUSH_INTERVAL
+        # (300 s, ~288 a day), so any cron under ~5 minutes finds new work
+        # almost every time and wrote ~288 permanent entries a day. Thousands
+        # a month, burying the handful that matter.
+        #
+        # These two do not survive the ledger being dropped, which is the
+        # whole reason to write here instead of relying on Postgres — it
+        # is derived and disposable, and rebuilding it loses the fact that
+        # a column ever appeared or that a rebuild was ever ordered:
+        #
+        #   new_columns   a schema change. The table means something
+        #                 different after this run than before it
+        #   --rebuild     the ledger was deliberately ignored and rows
+        #                 rewritten, so two readings of the same range
+        #                 disagreeing has a recorded cause
+        #
+        # A run that stops part-way has made them just as surely as one that
+        # finishes, so it writes the same entry, saying where it stopped.
+        #
+        # A routine catch-up run is not silent, just not permanent: the
+        # summary still goes to stderr, and to the journal with it.
+        if args.dry_run:
+            pass        # wrote nothing, so there is nothing to record
+        elif new_columns or args.rebuild:
+            comment = f"updated pg: {summary()}"
+            if stopped_at:
+                comment += f", stopped at {stopped_at}"
+            log_action_safely(
+                s3, config["s3_bucket"], APPLICATION, exit_code, comment,
+                {"objects": total_objects, "rows": total_rows, "table": args.table,
+                 "bucket": args.bucket, "proto": args.proto,
+                 "rebuild": args.rebuild, "new_columns": new_columns,
+                 "dropped_out_of_range": total_dropped})
+
+    session = None
     try:
-        ensure_ledger(con, args.ledger)
-        done = set() if args.rebuild else ledger_keys(con, args.ledger)
+        # A dry run writes nothing, so it takes no lock and waits on no one.
+        session = session_mod.Session(config, args.table, lock=not args.dry_run)
+        ensure_ledger(session.con, args.ledger)
+        done = set() if args.rebuild else ledger_keys(session.con, args.ledger)
 
         keys = [k for k in iter_keys(s3, config["s3_bucket"], since, until, args.proto)
                 if k not in done]
@@ -202,8 +291,6 @@ def run(args, config) -> int:
         # Rows spanning an object boundary are handled by the upsert: the
         # second object's bucket row updates the first's rather than
         # replacing it, column by column.
-        total_rows = total_objects = total_dropped = 0
-        new_columns: list[str] = []
         for key in keys:
             buckets = bucket_mod.Buckets(bucket_size)
             read = ingest_object(s3, config["s3_bucket"], key, buckets)
@@ -217,59 +304,45 @@ def run(args, config) -> int:
                 total_rows += len(rows)
                 continue
 
-            new_columns += table_mod.ensure(con, args.table, buckets.fields())
-            written = table_mod.write(con, args.table, rows)
-            record_key(con, args.ledger, key, rows)
+            written = session.call(key, write_object, args, key, buckets, rows, new_columns)
             total_objects += 1
             total_rows += written
             if args.verbose:
                 print(f"  {key}: {read} record(s) -> {written} row(s)", file=sys.stderr)
 
-        summary = (f"{total_objects} object(s), {total_rows} row(s) into "
-                   f"{args.table} at {args.bucket}")
-        if total_dropped:
-            summary += f", {total_dropped} sample(s) dropped out of range"
-        if new_columns:
-            summary += f", {len(new_columns)} new column(s): {', '.join(new_columns)}"
-        print(f"Done: {summary}.", file=sys.stderr)
-
+        print(f"Done: {summary()}.", file=sys.stderr)
         if args.dry_run:
             print("This was a DRY RUN — nothing was written to Postgres.",
                   file=sys.stderr)
-        elif new_columns or args.rebuild:
-            # Only runs that did something no later reader could reconstruct.
-            #
-            # WHICH objects were ingested, and how many rows each produced, is
-            # already in the ledger table — per object, written in the loop
-            # above. An entry per incremental run duplicates that into a
-            # bucket whose credentials cannot delete: the logger lands a new
-            # object every FLUSH_INTERVAL (300 s, ~288 a day), so any cron
-            # under ~5 minutes finds new work almost every time and wrote
-            # ~288 permanent entries a day. Thousands a month, burying the
-            # handful that matter.
-            #
-            # These two do not survive the ledger being dropped, which is the
-            # whole reason to write here instead of relying on Postgres — it
-            # is derived and disposable, and rebuilding it loses the fact that
-            # a column ever appeared or that a rebuild was ever ordered:
-            #
-            #   new_columns   a schema change. The table means something
-            #                 different after this run than before it
-            #   --rebuild     the ledger was deliberately ignored and rows
-            #                 rewritten, so two readings of the same range
-            #                 disagreeing has a recorded cause
-            #
-            # A routine catch-up run is not silent, just not permanent: the
-            # summary above still goes to stderr, and to the journal with it.
-            log_action_safely(
-                s3, config["s3_bucket"], APPLICATION, 0, f"updated pg: {summary}",
-                {"objects": total_objects, "rows": total_rows, "table": args.table,
-                 "bucket": args.bucket, "proto": args.proto,
-                 "rebuild": args.rebuild, "new_columns": new_columns,
-                 "dropped_out_of_range": total_dropped})
+        audit(0)
         return 0
+
+    except (session_mod.Busy, psycopg.OperationalError, BotoCoreError, ClientError) as e:
+        # A condition a later run may not meet. A bug is not one, so a
+        # permanent S3 error (a wrong key, a denied bucket) keeps its
+        # traceback, as does every psycopg error that is not operational.
+        if isinstance(e, ClientError) and not _is_retryable(e):
+            raise
+        busy = isinstance(e, session_mod.Busy)
+        why = " / ".join(str(e).split("\n"))
+        if busy and key is None:
+            print(f"Not running: {why}.", file=sys.stderr)
+            return 0
+        lines = [f"Stopped {f'at {key}' if key else 'before the first object'}: {why}."]
+        if total_objects:
+            lines.append(f"Written before it: {summary()} — each object committed "
+                         f"and in the ledger.")
+        lines.append("The run holding the table carries on from here." if busy else
+                     "Rerun to resume: the ledger skips what is done, and nothing "
+                     "is half-written.")
+        print("\n".join(lines), file=sys.stderr)
+        code = 0 if busy else EX_TEMPFAIL
+        audit(code, stopped_at=key)
+        return code
+
     finally:
-        con.close()
+        if session is not None:
+            session.close()
 
 
 def main():

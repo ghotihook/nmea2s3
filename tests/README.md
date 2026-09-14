@@ -23,6 +23,7 @@ through the fakes in `helpers.py`.
 | `test_audit_log.py` | which tools write `_log/` entries, and which deliberately do not |
 | `test_formats.py` | row shapes, field types, key and filename layouts, object headers, the exporter's candump line, and agreement with `SCHEMA.md` |
 | `test_pg.py` | the wide table: bucket grid, device arbitration and `last()` within it, the range guard, unit conversion, and DDL that grows a column |
+| `test_pg_update.py` | a whole `nmea2s3-update-pg` run: a lost connection replaced once, a clean stop that resumes, the one-run-per-table lock, and keepalives at both ends |
 | `test_migrate_n0183.py` | the 0183 importer: the record it produces, and the idempotence that makes a re-run free |
 
 ## Why these tests exist

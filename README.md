@@ -333,6 +333,15 @@ ledger table of consumed keys makes it safe to run on a cron over an
 overlapping window. `--rebuild` reprocesses anyway — every write is an
 upsert keyed on `ts`.
 
+**A run that cannot go on stops where it is, and the next one resumes.** A
+connection lost under an object is replaced once and the object written
+again; lost twice, or Postgres or S3 down, the run names the object it
+stopped at and exits 75, "try again later" — everything before it is already
+committed and in the ledger. Only one run writes a table at a time: another
+finds it locked, says by which session, and exits 0. Keepalives at both ends
+notice a dead link in about a minute, so a run that died releases the table
+about as fast.
+
 > **A unit change needs a rebuild of the WHOLE range, in one go.** As of
 > 2026-09-03 every N2K temperature is stored in Celsius; before that, only
 > PGN 130312's was, and 130316, 130310 and the set point held Kelvin under
