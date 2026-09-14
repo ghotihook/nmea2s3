@@ -1,15 +1,21 @@
 -- metrics_1s — fr_observations resolved, calibrated and labelled.
 --
 -- STATIC. Written against the 95 columns fr_observations had on 2026-09-11,
--- plus the three n2k_bandg_raw_* columns, which appear once
--- nmea2s3-update-pg 0.3.4 or later has loaded a PGN 130824 frame. Runs with
--- nothing but psql:
+-- plus the three n2k_bandg_raw_* columns. Runs with nothing but psql:
 --
 --     psql "$DSN" -f sql/metrics_1s.sql
 --
 -- If a column is missing the CREATE fails naming it ("column o.<name> does not
 -- exist"). Delete it from its COALESCE and run again; `\d fr_observations`
--- shows what the table has. CREATE OR REPLACE keeps the view's grants.
+-- shows what the table has. The n2k_bandg_raw_* columns are the likely ones:
+-- they appear only once nmea2s3-update-pg 0.3.4 or later has loaded a PGN
+-- 130824 frame, and until then the *_raw columns come from XDR alone.
+--
+-- CREATE OR REPLACE keeps the view's grants, but can only add columns at the
+-- end, never move or rename one. A view created before 2026-09-14 has the
+-- *_raw columns elsewhere, and there this fails with "cannot change name of
+-- view column". Run `DROP VIEW public.metrics_1s;` once, then this file, and
+-- re-grant anything beyond ro_user's SELECT.
 --
 -- A plain VIEW, deliberately. Nothing is stored, so nothing goes stale: a
 -- relabelled leg, a back-dated calibration or a late spool object shows up in
@@ -69,14 +75,21 @@ SELECT
 FROM (
     SELECT
         o.ts,
+        -- *_raw: the B&G sensors' counts before the H2000 calibrates them, not
+        -- knots or degrees; awa_raw is a signed 16-bit count, not an angle.
+        -- PGN 130824 first, then XDR RAW_*: fastnet2n2k and fastnet2ip send
+        -- 130824, fastnet2ip also XDR, both from the same pyfastnet values.
         COALESCE(o.n2k_windangle_apparent, o.mwv_wind_angle_r) AS awa,
+        COALESCE(o.n2k_bandg_raw_wind_a, o.xdr_raw_wind_a) AS awa_raw,
         COALESCE(o.n2k_windspeed_apparent, o.mwv_wind_speed_r) AS aws,
+        COALESCE(o.n2k_bandg_raw_wind_s, o.xdr_raw_wind_s) AS aws_raw,
         COALESCE(o.n2k_windangle_true_boat_referenced, o.mwv_wind_angle_t) AS twa,
         COALESCE(o.n2k_windspeed_true_boat_referenced, o.mwv_wind_speed_t) AS tws,
         COALESCE(o.n2k_windangle_magnetic_ground_referenced_to_magnetic_north, o.mwd_direction_magnetic) AS twd,
         -- the speed that goes with twd: true wind over the GROUND, not the boat
         o.n2k_windspeed_magnetic_ground_referenced_to_magnetic_north AS tws_ground,
         COALESCE(o.n2k_speedwaterreferenced, o.vhw_water_speed_knots) AS stw,
+        COALESCE(o.n2k_bandg_raw_bsp, o.xdr_raw_bsp) AS stw_raw,
         -- PGN 128275, METRES. Log distance against GPS distance over a leg is
         -- a calibration check that does not depend on 1 s speed noise.
         o.n2k_log AS log_total,
@@ -101,20 +114,14 @@ FROM (
         -- comparing a log against
         o.n2k_hdop AS gnss_hdop,
         o.n2k_numberofsvs AS gnss_sats,
+        (o.n2k_method_code)::integer AS gnss_method_code,
+        (o.n2k_integrity_code)::integer AS gnss_integrity_code,
+        (o.n2k_gnsstype_code)::integer AS gnss_type_code,
         o.n2k_set AS bus_set,
         o.n2k_drift AS bus_drift,
         -- what the heading sensor applied (127250) first, then the model (127258)
         COALESCE(o.n2k_variation_magnetic, o.n2k_variation_wmm_2020) AS bus_variation,
-        o.n2k_leewayangle AS bus_leeway,
-        -- The B&G sensors' raw counts, before the H2000's calibration: not
-        -- knots or degrees. fastnet2n2k and fastnet2ip send them as PGN 130824,
-        -- and fastnet2ip also as XDR RAW_*, from the same pyfastnet values.
-        COALESCE(o.n2k_bandg_raw_wind_s, o.xdr_raw_wind_s) AS aws_raw,
-        COALESCE(o.n2k_bandg_raw_wind_a, o.xdr_raw_wind_a) AS awa_raw,
-        COALESCE(o.n2k_bandg_raw_bsp, o.xdr_raw_bsp) AS stw_raw,
-        (o.n2k_method_code)::integer AS gnss_method_code,
-        (o.n2k_integrity_code)::integer AS gnss_integrity_code,
-        (o.n2k_gnsstype_code)::integer AS gnss_type_code
+        o.n2k_leewayangle AS bus_leeway
     FROM public.fr_observations o
 ) r
 
