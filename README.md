@@ -40,7 +40,7 @@ Pin a tag for anything you actually deploy, so `nmea2s3-logger --version` in
 the journal tells you truthfully what is running:
 
 ```bash
-sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git@v0.3.2
+sudo pipx install --global --force git+https://github.com/ghotihook/nmea2s3.git@v0.3.3
 ```
 
 Four commands land on your `PATH`:
