@@ -31,7 +31,9 @@ carries what the field actually said — see GPS_TIME_PGNS and SKIP_LOOKUPS
 below. Anything left over is still dropped: BITLOOKUP is several meanings at
 once and wants a mask, not a code, and INDIRECT_LOOKUP means nothing without
 the field it depends on. Both would need a naming rule of their own, so they
-wait until something needs them.
+wait until something needs them. A repeating list is dropped too, with one
+exception: B&G's PGN 130824 key-value data, whose four raw sensor channels
+are read out of it by key — see BANDG_RAW_KEYS.
 
 The exception is that clock, because `ts` is only as good as the capture
 box's own clock and this is the archive's independent check on it. The GPS
@@ -101,6 +103,28 @@ LOOKUP_SUFFIX = "_code"
 SKIP_LOOKUPS = {"manufacturerCode", "industryCode", "proprietaryId",
                 "messageId", "repeatIndicator"}
 
+# PGN 130824, "B&G: key-value data". fastnet2n2k (3.4.0) and fastnet2ip
+# (3.3.0) put the four raw Fastnet sensor channels on the bus in it: the
+# counts before the H2000 applies its calibration, which the 0183 side
+# carries as XDR RAW_*. The frame is described byte by byte in fastnet2n2k's
+# docs/bandg_130824_raw_channels.md.
+#
+# The library returns the entries as one `##list##` field whose value is a
+# list, which the numeric filter drops — and did, silently, until
+# 2026-09-14. So the list is read here, by key.
+#
+# Only these four keys. Real B&G processors send dozens more in the same PGN,
+# each with a value type of its own, and a key read as the wrong type is a
+# plausible wrong number. Signed 16-bit counts, stored unconverted and
+# unbounded (see ranges.py).
+BANDG_KEY_VALUE = "bGKeyValueData"
+BANDG_RAW_KEYS = {
+    0x42: "bandg_raw_bsp",        # Boatspeed (Raw)
+    0x4A: "bandg_raw_heading",    # Heading (Raw)
+    0x4E: "bandg_raw_wind_s",     # Apparent Wind Speed (Raw)
+    0x52: "bandg_raw_wind_a",     # Apparent Wind Angle (Raw)
+}
+
 _MS_TO_KN = 1.94384
 
 
@@ -167,6 +191,28 @@ def _posix(day, time_of_day) -> float:
     return round(datetime.combine(day, time_of_day, timezone.utc).timestamp(), 6)
 
 
+def _bandg_raw(entries: list[dict]) -> dict[str, float]:
+    """130824's key-value entries -> {field_id: count} for BANDG_RAW_KEYS.
+
+    A value is its FIRST two bytes on the wire, little-endian and signed, so
+    it stays right if the second number of each Fastnet pair is ever sent
+    after it as a 4-byte value, as the frame's doc plans.
+
+    The library hands each value's bytes back in reverse wire order — `ec 01`,
+    which is 492, arrives as b'\\x01\\xec' — so those two bytes are the LAST
+    two here, read big-endian. That leans on a library quirk; tests/test_pg.py
+    pins it to the doc's own frames, so a library that fixes it fails there
+    instead of storing wrong counts.
+    """
+    values = {}
+    for entry in entries:
+        field_id = BANDG_RAW_KEYS.get(entry["key"].value)
+        value = entry["value"].value
+        if field_id and isinstance(value, bytes) and len(value) >= 2:
+            values[field_id] = float(int.from_bytes(value[-2:], "big", signed=True))
+    return values
+
+
 def decode_frame(can_id: int, data: str) -> tuple[dict, dict[str, float]] | None:
     """Return (discriminators, {field_id: converted_value}) or None."""
     try:
@@ -193,6 +239,10 @@ def decode_frame(can_id: int, data: str) -> tuple[dict, dict[str, float]] | None
             # .value is the resolved text and .raw_value the code behind it.
             if f.id not in SKIP_LOOKUPS and isinstance(f.raw_value, int):
                 values[f.id + LOOKUP_SUFFIX] = float(f.raw_value)
+        elif f.type is FieldTypes.VARIABLE:
+            # A repeating list of entries, not a value.
+            if msg.id == BANDG_KEY_VALUE:
+                values.update(_bandg_raw(f.value))
         elif isinstance(f.value, (int, float)) and not isinstance(f.value, bool):
             v = float(f.value)
             values[f.id] = CONVERSIONS[f.id](v) if f.id in CONVERSIONS else v

@@ -499,6 +499,80 @@ def test_frame_metadata_lookups_do_not_become_columns():
         f"only the measured lookup should survive, got {values}"
 
 
+# ── B&G raw sensor channels, PGN 130824 ──────────────────────────────────
+
+# fastnet2n2k's docs/bandg_130824_raw_channels.md, "All four keys": frames the
+# bridge encoded from real captures, and the counts they carry.
+BANDG_DOC_FRAMES = {
+    "1dff0823#00067d994220ec01": ("n2k_bandg_raw_bsp", 492.0),
+    "1dff0823#40067d994a200d6e": ("n2k_bandg_raw_heading", 28173.0),
+    "1dff0823#80067d994e200a03": ("n2k_bandg_raw_wind_s", 778.0),
+    "1dff0823#c0067d99522087c5": ("n2k_bandg_raw_wind_a", -14969.0),
+}
+
+
+def _bandg(entries, manufacturer=381, prio=7, src=0x23) -> list[str]:
+    """A PGN 130824 key-value message: the 2-byte proprietary header (reserved
+    bits set, industry 4 = marine), then per entry a 12-bit key, a 4-bit byte
+    length and the value. `entries` is [(key, value_bytes)]. A fast-packet,
+    so a message of more than one entry spans frames."""
+    header = manufacturer | (3 << 11) | (4 << 13)
+    data = struct.pack("<H", header) + b"".join(
+        struct.pack("<H", key | len(value) << 12) + value for key, value in entries)
+    return _fast_packet((prio << 26) | (0x1FF08 << 8) | src, data)
+
+
+def test_the_bandg_raw_channels_reach_their_columns():
+    """fastnet2n2k and fastnet2ip send the four raw sensor channels as PGN
+    130824. The library returns its entries as a list, which the numeric
+    filter dropped: before 0.3.4 every one of these frames produced nothing.
+
+    The doc's own frames, so this also pins the byte order. The library
+    returns each value's bytes reversed; if it ever stops, 492 reads as -5119
+    here rather than in the table."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    for raw in BANDG_DOC_FRAMES:
+        b.add(_rec(T0, "n2k", raw))
+    row = b.rows()[0]
+    assert {k: v for k, v in row.items() if k != "ts"} == dict(BANDG_DOC_FRAMES.values())
+    assert b.dropped_out_of_range == 0, "a raw count must not fail a range guard"
+
+
+def test_only_the_raw_keys_are_read_from_a_bandg_message():
+    """A real B&G processor sends many keys per message, across several
+    frames, each in a value type of its own. Key 65 is its Water Speed, whose
+    type nothing here knows, so it must not become a column — while the raw
+    key beside it, reassembled from the second frame, must."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    for raw in _bandg([(65, struct.pack("<H", 612)), (0x4E, struct.pack("<h", 778))]):
+        b.add(_rec(T0, "n2k", raw))
+    row = b.rows()[0]
+    assert {k: v for k, v in row.items() if k != "ts"} == {"n2k_bandg_raw_wind_s": 778.0}
+
+
+def test_a_raw_pair_is_read_as_its_first_number():
+    """Fastnet carries each raw channel as two signed 16-bit numbers, and the
+    bridges send only the first. The doc plans the pair as one 4-byte value,
+    first number first; the column stays the first number."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    for raw in _bandg([(0x4E, struct.pack("<hh", 778, 701)),
+                       (0x52, struct.pack("<hh", -14969, 1234))]):
+        b.add(_rec(T0, "n2k", raw))
+    row = b.rows()[0]
+    assert row["n2k_bandg_raw_wind_s"] == 778.0
+    assert row["n2k_bandg_raw_wind_a"] == -14969.0
+
+
+def test_another_makers_130824_is_not_read_as_bandg():
+    """Maretron and Mercury use PGN 130824 too, under their own manufacturer
+    codes and layouts. The same bytes behind another maker's header are not a
+    B&G raw count."""
+    b = bucket.Buckets(timedelta(seconds=1))
+    for raw in _bandg([(0x4E, struct.pack("<h", 778))], manufacturer=144):   # Mercury
+        b.add(_rec(T0, "n2k", raw))
+    assert not [f for f in b.fields() if f.startswith("n2k_bandg")], sorted(b.fields())
+
+
 # ── the table, driven through a fake connection ──────────────────────────
 
 class FakeCon:

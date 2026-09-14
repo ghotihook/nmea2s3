@@ -76,6 +76,8 @@ RANGES: dict[str, tuple[float, float]] = {
     # whatever their XDR unit field claims. RAW_WIND_S runs to ~4400 and
     # RAW_WIND_A is a signed 16-bit count. Found 2026-09-13: a knots bound on
     # xdr_raw_wind_s kept only its zero readings, so every stored value was 0.0.
+    # Their n2k form, n2k_bandg_raw_* from PGN 130824, is absent for the same
+    # reason.
 }
 
 
