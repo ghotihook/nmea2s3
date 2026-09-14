@@ -1,7 +1,9 @@
 -- metrics_1s — fr_observations resolved, calibrated and labelled.
 --
--- STATIC. Written against the 95 columns fr_observations had on 2026-09-11 —
--- every column named below exists there. Runs with nothing but psql:
+-- STATIC. Written against the 95 columns fr_observations had on 2026-09-11,
+-- plus the three n2k_bandg_raw_* columns, which appear once
+-- nmea2s3-update-pg 0.3.4 or later has loaded a PGN 130824 frame. Runs with
+-- nothing but psql:
 --
 --     psql "$DSN" -f sql/metrics_1s.sql
 --
@@ -104,9 +106,12 @@ FROM (
         -- what the heading sensor applied (127250) first, then the model (127258)
         COALESCE(o.n2k_variation_magnetic, o.n2k_variation_wmm_2020) AS bus_variation,
         o.n2k_leewayangle AS bus_leeway,
-        o.xdr_raw_wind_s AS aws_raw,
-        o.xdr_raw_wind_a AS awa_raw,
-        o.xdr_raw_bsp AS stw_raw,
+        -- The B&G sensors' raw counts, before the H2000's calibration: not
+        -- knots or degrees. fastnet2n2k and fastnet2ip send them as PGN 130824,
+        -- and fastnet2ip also as XDR RAW_*, from the same pyfastnet values.
+        COALESCE(o.n2k_bandg_raw_wind_s, o.xdr_raw_wind_s) AS aws_raw,
+        COALESCE(o.n2k_bandg_raw_wind_a, o.xdr_raw_wind_a) AS awa_raw,
+        COALESCE(o.n2k_bandg_raw_bsp, o.xdr_raw_bsp) AS stw_raw,
         (o.n2k_method_code)::integer AS gnss_method_code,
         (o.n2k_integrity_code)::integer AS gnss_integrity_code,
         (o.n2k_gnsstype_code)::integer AS gnss_type_code
